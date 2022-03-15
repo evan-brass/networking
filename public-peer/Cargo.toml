@@ -1,0 +1,10 @@
+[package]
+name = "public-peer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+webrtc = "0.4"
+tokio-tungstenite = { version = "0.17", features = ["rustls"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"
