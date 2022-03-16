@@ -10,6 +10,7 @@ use p256::ecdsa::{
 	VerifyingKey
 };
 
+#[derive(Debug)]
 pub struct Signature (pub P256Signature);
 impl Serialize for Signature {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -37,6 +38,8 @@ impl<'de> Deserialize<'de> for Signature {
 		d.deserialize_str(SignatureVisitor)
 	}
 }
+
+#[derive(PartialEq, Eq, Debug)]
 pub struct PeerId (pub VerifyingKey);
 impl Serialize for PeerId {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -71,14 +74,14 @@ impl<'de> Deserialize<'de> for PeerId {
 // For now the peer_id and signatures will be encoded as base64 strings.
 // TODO: Replace these with properly sized [u8; 32] or whatever the crypto library uses internally once we switch to a binary protocol
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
 	Routable(RoutableMessage),
 	UnRoutable(UnRoutableMessage)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum RoutableMessage {
@@ -103,7 +106,7 @@ pub enum RoutableMessage {
 	// TODO: DHT
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum UnRoutableMessage {
@@ -125,7 +128,7 @@ pub enum UnRoutableMessage {
 	// TODO: GossipSub
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FullMessage {
 	pub origin: PeerId,
 	pub body: String,

@@ -79,14 +79,8 @@ async fn handle_conn(stream: TcpStream) -> Result<(), Box<dyn Error>> {
 async fn handle_ws_message(m: FullMessage, ws: &mut WebSocketStream<TcpStream>) -> Result<(), Box<dyn Error>> {
 	// TODO: verify the message
 	let VerifiedMessage { origin, message } = m.verify()?;
-	match message {
-		Message::Routable(RoutableMessage::Addresses { addresses }) => {
-			// Store the addresses into our known addresses for this peer
-		},
-		_ => {
-
-		}
-	}
+	
+	println!("{:?} {:?}", origin, message);
 
 	Ok(())
 }

@@ -48,7 +48,8 @@ async function sign_message(msg) {
 async function verify_message(ws_data) {
 	try {
 		let {origin, body, signature} = JSON.parse(ws_data);
-		let origin_key = await crypto.subtle.importKey('raw', base64_decode(origin), P256, true, ['verify']);
+		// TODO: Fix whatever is causing firefox to throw an error about the following line.
+		let origin_key = await crypto.subtle.importKey('raw', base64_decode(origin), P256, false, ['verify']);
 		const data = text_encoder.encode(body);
 		signature = base64_decode(signature);
 		const is_valid = await crypto.subtle.verify(P256, origin_key, signature, data);
@@ -63,20 +64,95 @@ async function verify_message(ws_data) {
 	}
 }
 
-// Map from peer_id -> RTCDataChannel
+// Map from peer_id -> [RTCDataChannel | WebSocket]
 const routing_table = new Map();
+
+// Map from peer_id -> RTCPeerConnection
+const connection_table = new Map();
+
 
 // Connect to our seed addresses
 for (const addr of seed_addresses) {
 	let ws = new WebSocket(addr);
+	ws.onopen = () => {
+		ws.send(sign_message({
+			type: 'addresses',
+			addresses: []
+		}));
+	};
 	ws.onmessage = async ({data}) => {
 		const valid = await verify_message(data);
 		if (valid) {
-			const {origin, message} = valid;
-
-			// Once we've received a valid message on the websocket, we need to start trying to setup a WebRTC connection with the peer on the other side.
+			const {origin} = valid;
+			routing_table.set(origin, ws);
+			ws.onmessage = message_handler.bind(null, ws);
+			ws.onclose = () => {
+				const route = routing_table.get(origin);
+				if (route == ws) routing_table.delete(origin);
+			};
+			message_handler(ws, data);
+			return;
 		}
 	};
+}
+
+async function message_handler(from, data) {
+	const valid = await verify_message(data);
+
+	if (valid) {
+		const {origin, message} = valid;
+
+		// TODO: unwrap routed messages and modify reply to send a routed message back.
+		const reply = msg => {
+			const data = sign_message(msg);
+			from.send(data); // Both WebSocket and RTCDataChannel have a similiar send method
+		};
+	
+		if (message.type == 'Introduction') {
+			let conn = connection_table.get(origin);
+			if (!conn) {
+				conn = new RTCPeerConnection({ /* TODO: iceServers */ });
+				connection_table.set(origin, conn);
+				conn.onicecandidate = ({ candidate }) => {
+					reply({ type: "Introduction", ice: [candidate] });
+				};
+				conn.onnegotiationneeded = async () => {
+					const offer = await conn.createOffer();
+					await conn.setLocalDescription(offer);
+					reply({ type: "Introduction", sdp: conn.localDescription });
+				};
+				conn.onconnectionstatechange = () => {
+					if (conn.connectionState == 'closed') {
+						const current = connection_table.get(origin);
+						if (current == conn) connection_table.delete(origin);
+					}
+				};
+				const channel = conn.createDataChannel('hyperspace-protocol');
+				channel.onopen = () => {
+					const current = routing_table.get(origin);
+					if (current && current != channel) {
+						current.close();
+					}
+					routing_table.set(origin, channel);
+				};
+				channel.onclose = () => {
+					const current = routing_table.get(origin);
+					if (current && current == channel) {
+						routing_table.delete(origin);
+					}
+				};
+				channel.onmessage = message_handler.bind(null, channel);
+			}
+			for (const candidate of message.ice ?? []) {
+				await conn.addIceCandidate(candidate);
+			}
+			if (message.sdp) {
+				await conn.setRemoteDescription(message.sdp);
+			}
+		} else {
+			console.log(origin, message);
+		}
+	}
 }
 
 if (window.parent === null) {
