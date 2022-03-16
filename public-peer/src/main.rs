@@ -2,7 +2,6 @@
 use std::error::Error;
 use std::lazy::SyncLazy;
 use std::collections::HashMap;
-use std::pin::Pin;
 
 use tokio_tungstenite::accept_async;
 use tokio::net::{TcpListener, TcpStream};
@@ -12,11 +11,18 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::protocol::Message as WSMessage;
 use tokio_tungstenite::WebSocketStream;
 use p256::ecdsa::signature::Signer;
+use p256::ecdsa::VerifyingKey;
 
 mod messages;
-use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, UnRoutableMessage, Signature, PeerId};
+use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, Signature, PeerId};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::RTCPeerConnection;
 
-static ROUTING_TABLE: SyncLazy<Mutex<HashMap<String, RTCDataChannel>>> = SyncLazy::new(|| {
+static _ROUTING_TABLE: SyncLazy<Mutex<HashMap<VerifyingKey, RTCDataChannel>>> = SyncLazy::new(|| {
+	Mutex::new(HashMap::new())
+});
+
+static _CONNECTION_TABLE: SyncLazy<Mutex<HashMap<VerifyingKey, RTCPeerConnection>>> = SyncLazy::new(|| {
 	Mutex::new(HashMap::new())
 });
 
@@ -59,28 +65,24 @@ async fn handle_conn(stream: TcpStream) -> Result<(), Box<dyn Error>> {
 
 	// Listen for messages
 	while let Some(Ok(msg)) = ws.next().await {
+		// println!("Received ws message: {:?}", msg);
+
 		if let WSMessage::Text(s) = msg {
-			if let Ok(m) = serde_json::from_str::<FullMessage>(&s) {
-				if let Err(e) = handle_ws_message(m, &mut ws).await {
-					eprintln!("{:?}", e);
-					break;
-				}
-			} else {
-				break;
-			}
+			let fm = serde_json::from_str::<FullMessage>(&s)?;
+			handle_ws_message(fm, &mut ws).await?;
 		} else if let WSMessage::Close(_) = msg {
 			break;
 		}
 	}
+	println!("Socket closing");
 	ws.close(None).await?;
 	Ok(())
 }
 
-async fn handle_ws_message(m: FullMessage, ws: &mut WebSocketStream<TcpStream>) -> Result<(), Box<dyn Error>> {
-	// TODO: verify the message
-	let VerifiedMessage { origin, message } = m.verify()?;
-	
-	println!("{:?} {:?}", origin, message);
+async fn handle_ws_message(m: FullMessage, _ws: &mut WebSocketStream<TcpStream>) -> Result<(), Box<dyn Error>> {
+	let VerifiedMessage { origin: _, message } = m.verify()?;
+
+	println!("{:?}", message);
 
 	Ok(())
 }

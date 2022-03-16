@@ -21,14 +21,14 @@ struct SignatureVisitor;
 impl <'de> Visitor<'de> for SignatureVisitor {
 	type Value = Signature;
 	fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-		formatter.write_str("Expecting a base64 string that encodes a P-256 Signature")
+		formatter.write_str("Expecting a base64 string that encodes a P-256 Signature using asn.1")
 	}
 	fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-		let bytes = base64::decode(v).map_err(|e| {
+		let bytes = base64::decode(v).map_err(|_e| {
 			E::custom("found invalid base64")
 		})?;
-		let sig = P256Signature::from_asn1(&bytes).map_err(|e| {
-			E::custom("found invalid asn.1")
+		let sig = P256Signature::try_from(bytes.as_ref()).map_err(|_e| {
+			E::custom("couldn't read signature")
 		})?;
 		Ok(Signature(sig))
 	}
@@ -53,10 +53,10 @@ impl <'de> Visitor<'de> for PeerIdVisitor {
 		formatter.write_str("Expecting a base64 string that encodes a P-256 Signature")
 	}
 	fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-		let bytes = base64::decode(v).map_err(|e| {
+		let bytes = base64::decode(v).map_err(|_e| {
 			E::custom("found invalid base64")
 		})?;
-		let key = VerifyingKey::from_sec1_bytes(&bytes).map_err(|e| {
+		let key = VerifyingKey::from_sec1_bytes(&bytes).map_err(|_e| {
 			E::custom("found invalid SEC1")
 		})?;
 		Ok(PeerId(key))
@@ -86,8 +86,10 @@ pub enum Message {
 #[serde(tag = "type")]
 pub enum RoutableMessage {
 	Connect {
+		#[serde(default)]
 		sdp: Option<RTCSessionDescription>,
-		ice: Vec<RTCIceCandidateInit>
+		#[serde(default)]
+		ice: Option<RTCIceCandidateInit>
 	},
 	Addresses {
 		// TODO: Make an Enum for the addresses: WebSocket, WebPush, etc.
@@ -100,9 +102,7 @@ pub enum RoutableMessage {
 		msg: String,
 		#[serde(flatten)]
 		data: HashMap<String, String>
-	},
-	#[serde(other)]
-	UnknownMessage
+	}
 	// TODO: DHT
 }
 
@@ -124,7 +124,7 @@ pub enum UnRoutableMessage {
 	AppData {
 		// Send data to a peer (this is unroutable so if you want to send data to a peer you must have a direct connection to them)
 		content: String
-	},
+	}
 	// TODO: GossipSub
 }
 
@@ -136,7 +136,7 @@ pub struct FullMessage {
 }
 impl FullMessage {
 	pub fn verify(self: Self) -> Result<VerifiedMessage, Box<dyn Error>> {
-		let Self { origin, body, signature } = self;
+		let Self { origin, body, signature: _ } = self;
 		// TODO: verify the signature on the body
 		let message = serde_json::from_str(&body)?;
 

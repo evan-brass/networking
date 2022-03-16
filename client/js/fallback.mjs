@@ -12,7 +12,7 @@ const seed_addresses = [
 ];
 
 function base64_encode(uint8array) {
-	btoa(String.fromCharCode(...uint8array))
+	return btoa(String.fromCharCode(...uint8array))
 }
 function base64_decode(string) {
 	return new Uint8Array(
@@ -75,10 +75,10 @@ const connection_table = new Map();
 for (const addr of seed_addresses) {
 	let ws = new WebSocket(addr);
 	ws.onopen = () => {
-		ws.send(sign_message({
+		sign_message({
 			type: 'addresses',
 			addresses: []
-		}));
+		}).then(d => ws.send(d));
 	};
 	ws.onmessage = async ({data}) => {
 		const valid = await verify_message(data);
@@ -91,9 +91,69 @@ for (const addr of seed_addresses) {
 				if (route == ws) routing_table.delete(origin);
 			};
 			message_handler(ws, data);
+
+			// Try to replace the websocket with an RTCPeerConnection:
+			create_RTCPeerConnection(msg => {
+				sign_message(msg).then(d => ws.send(d));
+			}, origin);
+
 			return;
 		}
 	};
+}
+
+function create_RTCPeerConnection(reply, origin) {
+	const conn = new RTCPeerConnection({ iceServers: [{
+		// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
+		urls: [
+			'stun:stun.l.google.com:19302',
+			'stun:stun1.l.google.com:19302',
+			'stun:stun2.l.google.com:19302',
+			'stun:stun3.l.google.com:19302',
+			'stun:stun4.l.google.com:19302'
+		]
+	}] });
+	connection_table.set(origin, conn);
+	conn.onicecandidate = ({ candidate }) => {
+		if (candidate !== null) {
+			candidate = candidate.toJSON();
+			// TODO: submit a patch to WebRTC-rs to alias these fields to camelCase and use serde(default)
+			const new_candidate = {
+				candidate: candidate.candidate,
+				sdp_mid: candidate.sdpMid ?? "",
+				sdp_mline_index: candidate.sdpMLineIndex ?? 0,
+				username_fragment: candidate.usernameFragment ?? ""
+			};
+			reply({ type: "connect", ice: new_candidate });
+		}
+	};
+	conn.onnegotiationneeded = async () => {
+		const offer = await conn.createOffer();
+		await conn.setLocalDescription(offer);
+		reply({ type: "connect", sdp: conn.localDescription });
+	};
+	conn.onconnectionstatechange = () => {
+		if (conn.connectionState == 'closed') {
+			const current = connection_table.get(origin);
+			if (current == conn) connection_table.delete(origin);
+		}
+	};
+	const channel = conn.createDataChannel('hyperspace-protocol');
+	channel.onopen = () => {
+		const current = routing_table.get(origin);
+		if (current && current != channel) {
+			current.close();
+		}
+		routing_table.set(origin, channel);
+	};
+	channel.onclose = () => {
+		const current = routing_table.get(origin);
+		if (current && current == channel) {
+			routing_table.delete(origin);
+		}
+	};
+	channel.onmessage = message_handler.bind(null, channel);
+	return conn;
 }
 
 async function message_handler(from, data) {
@@ -104,44 +164,14 @@ async function message_handler(from, data) {
 
 		// TODO: unwrap routed messages and modify reply to send a routed message back.
 		const reply = msg => {
-			const data = sign_message(msg);
-			from.send(data); // Both WebSocket and RTCDataChannel have a similiar send method
+			// Both WebSocket and RTCDataChannel have a similiar send method
+			sign_message(msg).then(d => from.send(d));
 		};
 	
 		if (message.type == 'Introduction') {
 			let conn = connection_table.get(origin);
 			if (!conn) {
-				conn = new RTCPeerConnection({ /* TODO: iceServers */ });
-				connection_table.set(origin, conn);
-				conn.onicecandidate = ({ candidate }) => {
-					reply({ type: "Introduction", ice: [candidate] });
-				};
-				conn.onnegotiationneeded = async () => {
-					const offer = await conn.createOffer();
-					await conn.setLocalDescription(offer);
-					reply({ type: "Introduction", sdp: conn.localDescription });
-				};
-				conn.onconnectionstatechange = () => {
-					if (conn.connectionState == 'closed') {
-						const current = connection_table.get(origin);
-						if (current == conn) connection_table.delete(origin);
-					}
-				};
-				const channel = conn.createDataChannel('hyperspace-protocol');
-				channel.onopen = () => {
-					const current = routing_table.get(origin);
-					if (current && current != channel) {
-						current.close();
-					}
-					routing_table.set(origin, channel);
-				};
-				channel.onclose = () => {
-					const current = routing_table.get(origin);
-					if (current && current == channel) {
-						routing_table.delete(origin);
-					}
-				};
-				channel.onmessage = message_handler.bind(null, channel);
+				conn = create_RTCPeerConnection(reply, origin);
 			}
 			for (const candidate of message.ice ?? []) {
 				await conn.addIceCandidate(candidate);
