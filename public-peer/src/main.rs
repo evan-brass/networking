@@ -20,6 +20,7 @@ use p256::ecdsa::signature::Signer;
 
 mod messages;
 use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, Signature, PeerId};
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -111,23 +112,24 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Result<()> {
-	let ws = accept_async(stream).await?;
-	let (mut sink, mut stream) = ws.split();
+	let mut ws = accept_async(stream).await?;
 
 
 	// The first thing we do is send an addresses message so that the client on the other side knows what our peer_id is.
 	let addr = sign_message(&Message::Routable(RoutableMessage::Addresses { 
 		addresses: vec![String::from("ws://localhost:3030")]
 	}))?;
-	sink.feed(WSMessage::Text(
+	ws.feed(WSMessage::Text(
 		serde_json::to_string(&addr)?
 	)).await?;
 
 	// We need to listen for the first verified message so that we can insert the WebSocket into our routing table:
-	if let Some(Ok(WSMessage::Text(s))) = stream.next().await {
+	if let Some(Ok(WSMessage::Text(s))) = ws.next().await {
 		let fm = serde_json::from_str::<FullMessage>(&s)?;
 		let vm = fm.verify()?;
 
+
+		let (mut sink, mut stream) = ws.split();
 		let (tx, mut rx) = unbounded_channel();
 
 		let mut rt = ROUTING_TABLE.write().await;
@@ -136,7 +138,7 @@ async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Resu
 		sender.send(vm).await.map_err(|_| eyre!("Failed to send verified message"))?;
 
 		// Continue reading the websocket until it closes
-		let handle_incoming = async {
+		tokio::spawn(async move {
 			while let Some(Ok(WSMessage::Text(s))) = stream.next().await {
 				let fm = serde_json::from_str::<FullMessage>(&s)?;
 				let vm = fm.verify()?;
@@ -145,21 +147,15 @@ async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Resu
 					.map_err(|_| eyre!("Failed to send verified message"))?;
 			}
 			Result::<(), eyre::Report>::Ok(())
-		};
+		});
 
 		// Send any messages on from the tx
-		let handle_outgoing = async {
+		tokio::spawn(async move {
 			while let Some(m) = rx.recv().await {
 				sink.send(m).await?;
 			}
 			Result::<(), eyre::Report>::Ok(())
-		};
-
-		futures_util::pin_mut!(handle_incoming, handle_outgoing);
-		futures_util::future::select(
-			handle_incoming,
-			handle_outgoing
-		).await;
+		});
 	}
 	Ok(())
 }
@@ -199,6 +195,13 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 		})
 	})).await;
 
+	ret.on_data_channel(Box::new(move |dc| {
+		println!("Received a data channel.");
+		Box::pin(async move {
+
+		})
+	})).await;
+
 	let ice_reply = reply.clone();
 	ret.on_ice_candidate(Box::new(move |candidate| {
 		let reply = ice_reply.clone();
@@ -212,7 +215,14 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 		})
 	})).await;
 
-	let channel = ret.create_data_channel("hyperspace-protocol", None).await?;
+	let channel = ret.create_data_channel("hyperspace-protocol", Some(RTCDataChannelInit {
+		negotiated: Some(true),
+		id: Some(42),
+		ordered: None,
+		max_packet_life_time: None,
+		max_retransmits: None,
+		protocol: None
+	})).await?;
 
 	channel.on_message(Box::new(move |DataChannelMessage {is_string: _, data}| {
 		let local_sender = sender.clone();
@@ -226,6 +236,7 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 	
 	let dc = channel.clone();
 	channel.on_open(Box::new(|| {
+		println!("New RTCDataChannel Openned!");
 		Box::pin(async move {
 			let mut rt = ROUTING_TABLE.write().await;
 			rt.insert(origin, Route::DC(dc));

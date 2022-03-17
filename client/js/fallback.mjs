@@ -48,7 +48,7 @@ async function sign_message(msg) {
 async function verify_message(ws_data) {
 	try {
 		let {origin, body, signature} = JSON.parse(ws_data);
-		// TODO: Fix whatever is causing firefox to throw an error about the following line.
+		// NOTE: Looks like Firefox doesn't like importing compressed P-256 keys.  Won't be an issue in the future when we do the crypto in Rust.
 		let origin_key = await crypto.subtle.importKey('raw', base64_decode(origin), P256, false, ['verify']);
 		const data = text_encoder.encode(body);
 		signature = base64_decode(signature);
@@ -80,7 +80,7 @@ for (const addr of seed_addresses) {
 			addresses: []
 		}).then(d => ws.send(d));
 	};
-	ws.onmessage = async ({data}) => {
+	ws.onmessage = async ({ data }) => {
 		const valid = await verify_message(data);
 		if (valid) {
 			const {origin} = valid;
@@ -90,7 +90,7 @@ for (const addr of seed_addresses) {
 				const route = routing_table.get(origin);
 				if (route == ws) routing_table.delete(origin);
 			};
-			message_handler(ws, data);
+			message_handler(ws, { data });
 
 			// Try to replace the websocket with an RTCPeerConnection:
 			create_RTCPeerConnection(msg => {
@@ -138,7 +138,11 @@ function create_RTCPeerConnection(reply, origin) {
 			if (current == conn) connection_table.delete(origin);
 		}
 	};
-	const channel = conn.createDataChannel('hyperspace-protocol');
+	conn.ondatachannel = console.log;
+	const channel = conn.createDataChannel('hyperspace-protocol', {
+		negotiated: true,
+		id: 42
+	});
 	channel.onopen = () => {
 		console.log("New RTCDataChannel Openned!");
 		
@@ -158,11 +162,13 @@ function create_RTCPeerConnection(reply, origin) {
 	return conn;
 }
 
-async function message_handler(from, data) {
+async function message_handler(from, { data }) {
 	const valid = await verify_message(data);
 
 	if (valid) {
 		const {origin, message} = valid;
+
+		console.log(origin, from, message);
 
 		// TODO: unwrap routed messages and modify reply to send a routed message back.
 		const reply = msg => {
@@ -170,19 +176,27 @@ async function message_handler(from, data) {
 			sign_message(msg).then(d => from.send(d));
 		};
 	
-		if (message.type == 'Introduction') {
+		if (message.type == 'connect') {
 			let conn = connection_table.get(origin);
 			if (!conn) {
 				conn = create_RTCPeerConnection(reply, origin);
 			}
-			for (const candidate of message.ice ?? []) {
-				await conn.addIceCandidate(candidate);
-			}
 			if (message.sdp) {
 				await conn.setRemoteDescription(message.sdp);
+				if (message.sdp.type == 'offer') {
+					await conn.setLocalDescription(await conn.createAnswer());
+					reply({ type: 'Connect', sdp: conn.localDescription });
+				}
 			}
-		} else {
-			console.log(origin, message);
+			if (message.ice) {
+				// TODO: submit a patch to WebRTC-rs to serde(alias these fields)
+				await conn.addIceCandidate({
+					candidate: message.ice.candidate,
+					sdpMid: message.ice.sdp_mid,
+					sdpMLineIndex: message.ice.sdp_mline_index,
+					usernameFragment: message.ice.username_fragment
+				});
+			}
 		}
 	}
 }

@@ -39,7 +39,7 @@ impl<'de> Deserialize<'de> for Signature {
 pub struct PeerId(pub VerifyingKey);
 impl Serialize for PeerId {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-		base64::encode(self.0.to_encoded_point(true)).serialize(s)
+		base64::encode(self.0.to_encoded_point(false)).serialize(s)
 	}
 }
 struct PeerIdVisitor;
