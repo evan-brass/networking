@@ -1,35 +1,31 @@
-use std::collections::HashMap;
-use std::error::Error;
+use std::hash::Hasher;
+use std::{collections::HashMap, hash::Hash};
 
-use serde::{de::Visitor, Serialize, Deserialize, Serializer, Deserializer};
+use eyre::Result;
+
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use p256::ecdsa::{
-	Signature as P256Signature,
-	VerifyingKey
-};
+use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
 
 #[derive(Debug)]
-pub struct Signature (pub P256Signature);
+pub struct Signature(pub P256Signature);
 impl Serialize for Signature {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
 		base64::encode(self.0).serialize(s)
 	}
 }
 struct SignatureVisitor;
-impl <'de> Visitor<'de> for SignatureVisitor {
+impl<'de> Visitor<'de> for SignatureVisitor {
 	type Value = Signature;
 	fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
 		formatter.write_str("Expecting a base64 string that encodes a P-256 Signature using asn.1")
 	}
 	fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-		let bytes = base64::decode(v).map_err(|_e| {
-			E::custom("found invalid base64")
-		})?;
-		let sig = P256Signature::try_from(bytes.as_ref()).map_err(|_e| {
-			E::custom("couldn't read signature")
-		})?;
+		let bytes = base64::decode(v).map_err(|_e| E::custom("found invalid base64"))?;
+		let sig = P256Signature::try_from(bytes.as_ref())
+			.map_err(|_e| E::custom("couldn't read signature"))?;
 		Ok(Signature(sig))
 	}
 }
@@ -39,32 +35,37 @@ impl<'de> Deserialize<'de> for Signature {
 	}
 }
 
-#[derive(PartialEq, Eq, Debug)]
-pub struct PeerId (pub VerifyingKey);
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PeerId(pub VerifyingKey);
 impl Serialize for PeerId {
 	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
 		base64::encode(self.0.to_encoded_point(true)).serialize(s)
 	}
 }
 struct PeerIdVisitor;
-impl <'de> Visitor<'de> for PeerIdVisitor {
+impl<'de> Visitor<'de> for PeerIdVisitor {
 	type Value = PeerId;
 	fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
 		formatter.write_str("Expecting a base64 string that encodes a P-256 Signature")
 	}
 	fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-		let bytes = base64::decode(v).map_err(|_e| {
-			E::custom("found invalid base64")
-		})?;
-		let key = VerifyingKey::from_sec1_bytes(&bytes).map_err(|_e| {
-			E::custom("found invalid SEC1")
-		})?;
+		let bytes = base64::decode(v).map_err(|_e| E::custom("found invalid base64"))?;
+		let key =
+			VerifyingKey::from_sec1_bytes(&bytes).map_err(|_e| E::custom("found invalid SEC1"))?;
 		Ok(PeerId(key))
 	}
 }
 impl<'de> Deserialize<'de> for PeerId {
 	fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
 		d.deserialize_str(PeerIdVisitor)
+	}
+}
+impl Hash for PeerId {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		let point = self.0.to_encoded_point(false);
+		for b in point.as_ref() {
+			state.write_u8(*b);
+		}
 	}
 }
 
@@ -78,7 +79,7 @@ impl<'de> Deserialize<'de> for PeerId {
 #[serde(untagged)]
 pub enum Message {
 	Routable(RoutableMessage),
-	UnRoutable(UnRoutableMessage)
+	UnRoutable(UnRoutableMessage),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,21 +90,20 @@ pub enum RoutableMessage {
 		#[serde(default)]
 		sdp: Option<RTCSessionDescription>,
 		#[serde(default)]
-		ice: Option<RTCIceCandidateInit>
+		ice: Option<RTCIceCandidateInit>,
 	},
 	Addresses {
 		// TODO: Make an Enum for the addresses: WebSocket, WebPush, etc.
-		addresses: Vec<String>
+		addresses: Vec<String>,
 	},
 	RoutingTable {
-		peers: Vec<PeerId>
+		peers: Vec<PeerId>,
 	},
 	Error {
 		msg: String,
 		#[serde(flatten)]
-		data: HashMap<String, String>
-	}
-	// TODO: DHT
+		data: HashMap<String, String>,
+	}, // TODO: DHT
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,35 +119,35 @@ pub enum UnRoutableMessage {
 		// The path is a list of peers through whom the message should travel on it's way to the last peer in the path.
 		path: Vec<PeerId>,
 		// The contents is the serialized message, that is intended for the last peer in the path.
-		content: RoutableMessage
+		content: RoutableMessage,
 	},
 	AppData {
 		// Send data to a peer (this is unroutable so if you want to send data to a peer you must have a direct connection to them)
-		content: String
-	}
-	// TODO: GossipSub
+		content: String,
+	}, // TODO: GossipSub
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FullMessage {
 	pub origin: PeerId,
 	pub body: String,
-	pub signature: Signature
+	pub signature: Signature,
 }
 impl FullMessage {
-	pub fn verify(self: Self) -> Result<VerifiedMessage, Box<dyn Error>> {
-		let Self { origin, body, signature: _ } = self;
+	pub fn verify(self: Self) -> Result<VerifiedMessage> {
+		let Self {
+			origin,
+			body,
+			signature: _,
+		} = self;
 		// TODO: verify the signature on the body
 		let message = serde_json::from_str(&body)?;
 
-		Ok(VerifiedMessage {
-			origin,
-			message
-		})
+		Ok(VerifiedMessage { origin, message })
 	}
 }
 
 pub struct VerifiedMessage {
 	pub origin: PeerId,
-	pub message: Message
+	pub message: Message,
 }

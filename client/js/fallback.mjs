@@ -140,6 +140,8 @@ function create_RTCPeerConnection(reply, origin) {
 	};
 	const channel = conn.createDataChannel('hyperspace-protocol');
 	channel.onopen = () => {
+		console.log("New RTCDataChannel Openned!");
+		
 		const current = routing_table.get(origin);
 		if (current && current != channel) {
 			current.close();

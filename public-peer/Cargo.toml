@@ -6,10 +6,12 @@ edition = "2021"
 [dependencies]
 webrtc = "0.4"
 tokio-tungstenite = { version = "0.17", features = ["rustls"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "tracing"] }
 serde_json = "1.0"
 serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 base64 = "0.13"
 p256 = "0.7.3"
 rand = "0.7"
+eyre = "0.6"
+console-subscriber = "0.1"
