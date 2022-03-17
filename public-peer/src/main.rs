@@ -17,9 +17,6 @@ use webrtc::api::API;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::protocol::Message as WSMessage;
 use p256::ecdsa::signature::Signer;
-
-mod messages;
-use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, Signature, PeerId};
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -27,6 +24,9 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+
+mod messages;
+use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, UnRoutableMessage, Signature, PeerId};
 
 
 enum Route {
@@ -36,7 +36,10 @@ enum Route {
 impl Route {
 	pub async fn send(&self, msg: &Message) -> Result<()> {
 		let fm = sign_message(&msg)?;
-		let data = serde_json::to_string(&fm)?;
+		self.send_full(&fm).await
+	}
+	pub async fn send_full(&self, fm: &FullMessage) -> Result<()> {
+		let data = serde_json::to_string(fm)?;
 		match self {
 			Route::WS(ws) => {
 				println!("Sending a message over websocket");
@@ -88,7 +91,7 @@ async fn main() -> Result<()> {
 
 	let listener = TcpListener::bind("0.0.0.0:3030").await?;
 
-	let (sender, mut recv) = tokio::sync::mpsc::channel::<VerifiedMessage>(10);
+	let (sender, mut recv) = tokio::sync::mpsc::channel::<FullMessage>(10);
 
 	// Listen to and handle messages (whether from WS or DC)
 	let handle_sender = sender.clone();
@@ -111,7 +114,7 @@ async fn main() -> Result<()> {
 	}
 }
 
-async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Result<()> {
+async fn handle_conn(sender: Sender<FullMessage>, stream: TcpStream) -> Result<()> {
 	let mut ws = accept_async(stream).await?;
 
 
@@ -135,15 +138,14 @@ async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Resu
 		let mut rt = ROUTING_TABLE.write().await;
 		rt.insert(vm.origin.clone(), Route::WS(tx));
 
-		sender.send(vm).await.map_err(|_| eyre!("Failed to send verified message"))?;
+		sender.send(fm).await.map_err(|_| eyre!("Failed to send verified message"))?;
 
 		// Continue reading the websocket until it closes
 		tokio::spawn(async move {
 			while let Some(Ok(WSMessage::Text(s))) = stream.next().await {
 				let fm = serde_json::from_str::<FullMessage>(&s)?;
-				let vm = fm.verify()?;
 		
-				sender.send(vm).await
+				sender.send(fm).await
 					.map_err(|_| eyre!("Failed to send verified message"))?;
 			}
 			Result::<(), eyre::Report>::Ok(())
@@ -160,7 +162,7 @@ async fn handle_conn(sender: Sender<VerifiedMessage>, stream: TcpStream) -> Resu
 	Ok(())
 }
 
-async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, reply: Arc<Reply>) -> Result<RTCPeerConnection> {
+async fn create_connection(sender: Sender<FullMessage>, origin: PeerId, reply: Arc<Reply>) -> Result<RTCPeerConnection> {
 	println!("Creating RTCPeerConnection");
 
 	let mut config = RTCConfiguration::default();
@@ -195,13 +197,6 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 		})
 	})).await;
 
-	ret.on_data_channel(Box::new(move |dc| {
-		println!("Received a data channel.");
-		Box::pin(async move {
-
-		})
-	})).await;
-
 	let ice_reply = reply.clone();
 	ret.on_ice_candidate(Box::new(move |candidate| {
 		let reply = ice_reply.clone();
@@ -229,8 +224,7 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 		Box::pin(async move {
 			let s = std::str::from_utf8(data.as_ref()).unwrap();
 			let fm = serde_json::from_str::<FullMessage>(&s).unwrap();
-			let vm = fm.verify().unwrap();
-			local_sender.send(vm).await.map_err(|_| ()).unwrap();
+			local_sender.send(fm).await.map_err(|_| ()).unwrap();
 		})
 	})).await;
 	
@@ -248,34 +242,84 @@ async fn create_connection(sender: Sender<VerifiedMessage>, origin: PeerId, repl
 
 #[derive(Clone)]
 enum Reply {
-	Direct(PeerId)
+	Direct(PeerId),
+	Path(Vec<PeerId>)
 	// TODO: add a path reply for responding to routed messages
 }
 impl Reply {
 	async fn reply(&self, msg: RoutableMessage) -> Result<()> {
-		println!("Replying...");
 		match self {
 			Reply::Direct(origin) => {
+				println!("Replying directly");
 				let rt = ROUTING_TABLE.read().await;
-				let route = rt.get(origin).unwrap();
-				route.send(&Message::Routable(msg)).await?;
+				if let Some(route) = rt.get(origin) {
+					route.send(&Message::Routable(msg)).await?;
+					return Ok(())
+				}
+			},
+			Reply::Path(path) => {
+				println!("Replying via path");
+				// Try to route the message onward
+				let rt = ROUTING_TABLE.read().await;
+				for peer_id in path.iter().rev() {
+					if let Some(route) = rt.get(peer_id) {
+						route.send(&Message::UnRoutable(UnRoutableMessage::SourceRoute {
+							path: path.clone(), content: msg
+						})).await?;
+						return Ok(())
+					}
+				}
 			}
 		}
-		Ok(())
+		Err(eyre!("Failed to reply."))
 	}
 }
 
-async fn handle_message(sender: Sender<VerifiedMessage>, VerifiedMessage {origin, message}: VerifiedMessage) -> Result<()> {
-	// TODO: handle routed messages
-	let reply = Arc::new(Reply::Direct(origin.clone()));
+async fn handle_message(sender: Sender<FullMessage>, fm: FullMessage) -> Result<()> {
+	let VerifiedMessage { origin, message } = fm.verify()?;
+
+	let (message, reply) = match message {
+		Message::UnRoutable(UnRoutableMessage::SourceRoute{ path, content }) => {
+			let mut path_back: Vec<_> = path.iter().cloned().rev().collect();
+			path_back.push(origin.clone());
+
+			let our_peer_id = PeerId(PEER_KEY.verify_key());
+			if path.last() != Some(&our_peer_id) {
+				// Try to route the message onward
+				let rt = ROUTING_TABLE.read().await;
+				for peer_id in path.iter().rev() {
+					if peer_id == &our_peer_id {
+						// Routing failed
+						break;
+					} else if let Some(route) = rt.get(peer_id) {
+						route.send_full(&fm).await?;
+						return Ok(())
+					}
+				}
+				// Send a routing failed message if the message wasn't already an error
+				if !content.is_error() {
+					Reply::Path(path_back).reply(RoutableMessage::Error {
+						msg: String::from("Routing failed"), data: HashMap::new()
+					}).await?;
+				}
+				return Err(eyre!("Routing failed: {:?}", path));
+			}
+			(content, Arc::new(Reply::Path(path_back)))
+		},
+		Message::UnRoutable(UnRoutableMessage::AppData { content: _ }) => {
+			// TODO: Send the data to the proper application.  Although, public peers probably won't have any applications running so... For now we'll just ignore data messages.
+			return Ok(());
+		},
+		Message::Routable(m) => (m, Arc::new(Reply::Direct(origin.clone())))
+	};
 
 	println!("{:?}", message);
 
 	match message {
-		Message::Routable(RoutableMessage::Connect {
+		RoutableMessage::Connect {
 			sdp,
 			ice
-		}) => {
+		} => {
 			let mut conn_table = CONNECTION_TABLE.write().await;
 			if !conn_table.contains_key(&origin) {
 				conn_table.insert(
@@ -300,6 +344,18 @@ async fn handle_message(sender: Sender<VerifiedMessage>, VerifiedMessage {origin
 				conn.add_ice_candidate(ice).await?;
 			}
 		},
+		RoutableMessage::Query { addresses, routing_table } => {
+			if addresses {
+				reply.reply(RoutableMessage::Addresses { addresses: vec![
+					String::from("localhost:3030")
+				] }).await?;
+			}
+			if routing_table {
+				let rt = ROUTING_TABLE.read().await;
+				let peers = rt.keys().cloned().collect();
+				reply.reply(RoutableMessage::RoutingTable { peers }).await?;
+			}
+		}
 		_ => {}
 	}
 

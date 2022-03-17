@@ -1,4 +1,4 @@
-import { openDB, deleteDB, wrap, unwrap } from 'https://cdn.jsdelivr.net/npm/idb/+esm';
+// import { openDB, deleteDB, wrap, unwrap } from 'https://cdn.jsdelivr.net/npm/idb/+esm';
 
 const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder("utf-8");
@@ -45,6 +45,7 @@ async function sign_message(msg) {
 		signature
 	});
 }
+
 async function verify_message(ws_data) {
 	try {
 		let {origin, body, signature} = JSON.parse(ws_data);
@@ -69,6 +70,12 @@ const routing_table = new Map();
 
 // Map from peer_id -> RTCPeerConnection
 const connection_table = new Map();
+
+window.testing = {
+	routing_table,
+	connection_table,
+	sign_message
+};
 
 
 // Connect to our seed addresses
@@ -166,15 +173,33 @@ async function message_handler(from, { data }) {
 	const valid = await verify_message(data);
 
 	if (valid) {
-		const {origin, message} = valid;
+		let {origin, message} = valid;
+		let reply;
 
-		console.log(origin, from, message);
+		console.log("Received", origin, from, message);
 
-		// TODO: unwrap routed messages and modify reply to send a routed message back.
-		const reply = msg => {
-			// Both WebSocket and RTCDataChannel have a similiar send method
-			sign_message(msg).then(d => from.send(d));
-		};
+		if (message.type == 'source_route') {
+			const {path, content} = message;
+			const path_back = Array.from(path);
+			path_back.reverse();
+			path_back.push(origin);
+			reply = msg => {
+				console.log("Replying via path");
+				sign_message({
+					type: 'source_route',
+					path: path_back,
+					content: msg
+				}).then(d => from.send(d));
+			};
+			// TODO: Make sure that content is a routable message
+			message = content;
+		} else {
+			reply = msg => {
+				console.log("Replying directly");
+				// Both WebSocket and RTCDataChannel have a similiar send method
+				sign_message(msg).then(d => from.send(d));
+			};
+		}
 	
 		if (message.type == 'connect') {
 			let conn = connection_table.get(origin);
@@ -196,6 +221,14 @@ async function message_handler(from, { data }) {
 					sdpMLineIndex: message.ice.sdp_mline_index,
 					usernameFragment: message.ice.username_fragment
 				});
+			}
+		} else if (message.type == 'query') {
+			if (message.addresses) {
+				reply({ type: 'addresses', addresses: [] });
+			}
+			if (message.routing_table) {
+				const peers = Array.from(routing_table.keys());
+				reply({ type: 'routing_table', peers })
 			}
 		}
 	}

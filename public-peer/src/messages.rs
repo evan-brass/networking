@@ -8,6 +8,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
+use p256::ecdsa::signature::Verifier;
 
 #[derive(Debug)]
 pub struct Signature(pub P256Signature);
@@ -99,11 +100,25 @@ pub enum RoutableMessage {
 	RoutingTable {
 		peers: Vec<PeerId>,
 	},
+	Query {
+		#[serde(default)]
+		addresses: bool,
+		#[serde(default)]
+		routing_table: bool
+	},
 	Error {
 		msg: String,
 		#[serde(flatten)]
 		data: HashMap<String, String>,
 	}, // TODO: DHT
+}
+impl RoutableMessage {
+	pub fn is_error(&self) -> bool {
+		match self {
+			RoutableMessage::Error { msg: _, data: _ } => true,
+			_ => false
+		}
+	}
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,16 +149,11 @@ pub struct FullMessage {
 	pub signature: Signature,
 }
 impl FullMessage {
-	pub fn verify(self: Self) -> Result<VerifiedMessage> {
-		let Self {
-			origin,
-			body,
-			signature: _,
-		} = self;
-		// TODO: verify the signature on the body
-		let message = serde_json::from_str(&body)?;
+	pub fn verify(&self) -> Result<VerifiedMessage> {
+		self.origin.0.verify(self.body.as_bytes(), &self.signature.0)?;
+		let message = serde_json::from_str(&self.body)?;
 
-		Ok(VerifiedMessage { origin, message })
+		Ok(VerifiedMessage { origin: self.origin.clone(), message })
 	}
 }
 
