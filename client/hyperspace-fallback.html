@@ -9,6 +9,7 @@
 				// If this timeout runs, then the user must not have a chosen hyperspace-client
 				// We will load our fallback hyperspace-client
 				import("/js/fallback.mjs");
+				window.location.hash = "#unused";
 			}, 2000);
 			window.location = 'web+hyperspace-client:unused_data';
 		</script>
