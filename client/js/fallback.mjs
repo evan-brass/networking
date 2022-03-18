@@ -10,6 +10,7 @@ const seed_addresses = [
 	// "seed1.hyperspace.gl"
 	// etc.
 ];
+const min_connections = 5;
 
 function base64_encode(uint8array) {
 	return btoa(String.fromCharCode(...uint8array))
@@ -32,6 +33,7 @@ const publicKey_encoded = await (async () => {
 	const exported = await crypto.subtle.exportKey("raw", publicKey);
 	return base64_encode(new Uint8Array(exported));
 })();
+console.log("Our id is:", publicKey_encoded);
 
 async function sign_message(msg) {
 	const body = JSON.stringify(msg);
@@ -92,32 +94,27 @@ for (const addr of seed_addresses) {
 		if (valid) {
 			const {origin} = valid;
 			routing_table.set(origin, ws);
-			ws.onmessage = message_handler.bind(null, ws);
+			ws.onmessage = message_handler;
 			ws.onclose = () => {
 				const route = routing_table.get(origin);
 				if (route == ws) routing_table.delete(origin);
 			};
-			message_handler(ws, { data });
+			message_handler({ data });
 
 			// Try to replace the websocket with an RTCPeerConnection:
-			create_RTCPeerConnection(msg => {
-				sign_message(msg).then(d => ws.send(d));
-			}, origin);
+			create_RTCPeerConnection([origin], origin);
 
 			return;
 		}
 	};
 }
 
-function create_RTCPeerConnection(reply, origin) {
+function create_RTCPeerConnection(path_back, origin) {
 	const conn = new RTCPeerConnection({ iceServers: [{
 		// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
 		urls: [
 			'stun:stun.l.google.com:19302',
-			'stun:stun1.l.google.com:19302',
-			'stun:stun2.l.google.com:19302',
-			'stun:stun3.l.google.com:19302',
-			'stun:stun4.l.google.com:19302'
+			'stun:stun1.l.google.com:19302'
 		]
 	}] });
 	connection_table.set(origin, conn);
@@ -131,16 +128,16 @@ function create_RTCPeerConnection(reply, origin) {
 				sdp_mline_index: candidate.sdpMLineIndex ?? 0,
 				username_fragment: candidate.usernameFragment ?? ""
 			};
-			reply({ type: "connect", ice: new_candidate });
+			route(path_back, { type: "connect", ice: new_candidate });
 		}
 	};
 	conn.onnegotiationneeded = async () => {
 		const offer = await conn.createOffer();
 		await conn.setLocalDescription(offer);
-		reply({ type: "connect", sdp: conn.localDescription });
+		await route(path_back, { type: "connect", sdp: conn.localDescription });
 	};
 	conn.onconnectionstatechange = () => {
-		if (conn.connectionState == 'closed') {
+		if (['closed', 'disconnected', 'failed'].includes(conn.connectionState)) {
 			const current = connection_table.get(origin);
 			if (current == conn) connection_table.delete(origin);
 		}
@@ -165,52 +162,69 @@ function create_RTCPeerConnection(reply, origin) {
 			routing_table.delete(origin);
 		}
 	};
-	channel.onmessage = message_handler.bind(null, channel);
+	channel.onmessage = message_handler;
 	return conn;
 }
 
-async function message_handler(from, { data }) {
+async function route(path, msgOrData) {
+	for (let i = path.length - 1; i >= 0; --i) {
+		const peer_id = path[i];
+		if (peer_id == publicKey_encoded) {
+			break;
+		} else if (routing_table.has(peer_id)) {
+			try {
+				if (typeof msgOrData !== 'string' && i < path.length - 1) {
+					msgOrData = {
+						type: 'source_route',
+						path: path.slice(i),
+						content: msgOrData
+					};
+				}
+				if (typeof msgOrData !== 'string') {
+					console.log("Send", msgOrData);
+					msgOrData = await sign_message(msgOrData);
+				}
+				const route = routing_table.get(peer_id);
+				route.send(msgOrData);
+				return;
+			} catch (e) { console.error(e); }
+		}
+	}
+	throw new Error('TODO: return path unreachable');
+}
+
+async function message_handler({ data }) {
 	const valid = await verify_message(data);
 
 	if (valid) {
 		let {origin, message} = valid;
-		let reply;
+		let path_back = [origin];
 
-		console.log("Received", origin, from, message);
+		console.log("Recv", message);
 
 		if (message.type == 'source_route') {
 			const {path, content} = message;
-			const path_back = Array.from(path);
-			path_back.reverse();
+			path_back = [...path].reverse();
 			path_back.push(origin);
-			reply = msg => {
-				console.log("Replying via path");
-				sign_message({
-					type: 'source_route',
-					path: path_back,
-					content: msg
-				}).then(d => from.send(d));
-			};
-			// TODO: Make sure that content is a routable message
-			message = content;
-		} else {
-			reply = msg => {
-				console.log("Replying directly");
-				// Both WebSocket and RTCDataChannel have a similiar send method
-				sign_message(msg).then(d => from.send(d));
-			};
+			if (path[path.length - 1] == publicKey_encoded) {
+				// TODO: Make sure that content is a routable message
+				message = content;
+			} else {
+				await route(path, data);
+				return;
+			}
 		}
 	
 		if (message.type == 'connect') {
 			let conn = connection_table.get(origin);
 			if (!conn) {
-				conn = create_RTCPeerConnection(reply, origin);
+				conn = create_RTCPeerConnection(path_back, origin);
 			}
 			if (message.sdp) {
 				await conn.setRemoteDescription(message.sdp);
 				if (message.sdp.type == 'offer') {
 					await conn.setLocalDescription(await conn.createAnswer());
-					reply({ type: 'Connect', sdp: conn.localDescription });
+					await route(path_back, { type: 'connect', sdp: conn.localDescription });
 				}
 			}
 			if (message.ice) {
@@ -224,15 +238,45 @@ async function message_handler(from, { data }) {
 			}
 		} else if (message.type == 'query') {
 			if (message.addresses) {
-				reply({ type: 'addresses', addresses: [] });
+				await route(path_back, { type: 'addresses', addresses: [] });
 			}
 			if (message.routing_table) {
 				const peers = Array.from(routing_table.keys());
-				reply({ type: 'routing_table', peers })
+				await route(path_back, { type: 'routing_table', peers })
+			}
+		} else if (message.type == 'routing_table') {
+			let attempts = routing_table.size;
+			for (const peer_id of message.peers ?? []) {
+				if (peer_id == publicKey_encoded) {
+					// Skip references to ourself
+				} else if (connection_table.has(peer_id)) {
+					// Skip references to connections that we've already created a RTCPeerConnection for	
+				} else if (attempts++ < min_connections) {
+					create_RTCPeerConnection([...path_back, peer_id], peer_id);
+				} else {
+					break;
+				}
 			}
 		}
 	}
 }
+
+async function heartbeat() {
+	if (routing_table.size < min_connections && routing_table.size > 0) {
+		// Find a random peer and see who they're connected to.
+		const keys = Array.from(routing_table.keys());
+		const key = keys[Math.trunc(Math.random() * keys.length)];
+		const route = routing_table.get(key);
+		route.send(await sign_message({
+			type: 'query',
+			routing_table: true
+		}));
+	}
+
+	console.log("Heartbeat Finished.");
+	setTimeout(heartbeat, 3000);
+}
+heartbeat();
 
 if (window.parent === null) {
 	throw new Error("The fallback hyperspace-client should be embedded in an iframe by the distributed web app.");

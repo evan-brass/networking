@@ -2,6 +2,7 @@ use std::hash::Hasher;
 use std::{collections::HashMap, hash::Hash};
 
 use eyre::Result;
+use eyre::eyre;
 
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -151,9 +152,12 @@ pub struct FullMessage {
 impl FullMessage {
 	pub fn verify(&self) -> Result<VerifiedMessage> {
 		self.origin.0.verify(self.body.as_bytes(), &self.signature.0)?;
-		let message = serde_json::from_str(&self.body)?;
-
-		Ok(VerifiedMessage { origin: self.origin.clone(), message })
+		if let Ok(message) = serde_json::from_str(&self.body) {
+			Ok(VerifiedMessage { origin: self.origin.clone(), message })
+		} else {
+			eprintln!("Invalid message: {:#?}", self.body);
+			Err(eyre!("Stuff"))
+		}
 	}
 }
 

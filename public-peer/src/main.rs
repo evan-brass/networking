@@ -169,10 +169,7 @@ async fn create_connection(sender: Sender<FullMessage>, origin: PeerId, reply: A
 	config.ice_servers = vec![RTCIceServer {
 		urls: vec![
 			String::from("stun:stun.l.google.com:19302"),
-			String::from("stun:stun1.l.google.com:19302"),
-			String::from("stun:stun2.l.google.com:19302"),
-			String::from("stun:stun3.l.google.com:19302"),
-			String::from("stun:stun4.l.google.com:19302")
+			String::from("stun:stun1.l.google.com:19302")
 		],
 		username: String::new(),
 		credential: String::new(),
