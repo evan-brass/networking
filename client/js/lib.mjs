@@ -18,3 +18,25 @@ export const P256 = {
 	namedCurve: 'P-256',
 	hash: 'SHA-256'
 };
+
+// Listen to an event as an async iterable
+export function stream(target, event, opts) {
+	const queue = [];
+	let res = false;
+	target.addEventListener(event, e => {
+		queue.push(e);
+		if (res) res();
+	}, opts);
+	return (async function*() {
+		while (1) {
+			if (queue.length) {
+				yield queue.shift();
+			} else {
+				await new Promise(resolve => {
+					res = resolve;
+				});
+				res = false;
+			}
+		}
+	})();
+}

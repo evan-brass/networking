@@ -5,7 +5,6 @@ import { bootstrap } from "./bootstrap.mjs";
 import { publicKey_encoded } from "./peer-id.mjs";
 import { sign_message, verify_message} from "./messages.mjs";
 
-
 await bootstrap();
 
 async function heartbeat() {

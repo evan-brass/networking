@@ -1,7 +1,7 @@
 import { base64_decode, base64_encode, text_encoder, P256 } from "./lib.mjs";
 import { privateKey, publicKey_encoded } from "./peer-id.mjs";
 import { routing_table, connection_table, route } from "./routing-table.mjs";
-import { min_connections } from "./network-props.mjs";
+import { min_connections, iceServers } from "./network-props.mjs";
 import { testing } from "./testing.mjs";
 
 export async function sign_message(msg) {
@@ -39,13 +39,7 @@ export async function verify_message(ws_data) {
 
 
 export function create_RTCPeerConnection(path_back, origin) {
-	const conn = new RTCPeerConnection({ iceServers: [{
-		// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
-		urls: [
-			'stun:stun.l.google.com:19302',
-			'stun:stun1.l.google.com:19302'
-		]
-	}] });
+	const conn = new RTCPeerConnection({ iceServers });
 	connection_table.set(origin, conn);
 	conn.onicecandidate = ({ candidate }) => {
 		if (candidate !== null) {
@@ -71,7 +65,13 @@ export function create_RTCPeerConnection(path_back, origin) {
 			if (current == conn) connection_table.delete(origin);
 		}
 	};
-	const channel = conn.createDataChannel('hyperspace-protocol', {
+	conn.oniceconnectionstatechange = () => {
+		if (['closed', 'disconnected', 'failed'].includes(conn.iceConnectionState)) {
+			const current = connection_table.get(origin);
+			if (current == conn) connection_table.delete(origin);
+		}
+	};
+	const channel = conn.createDataChannel('hyperspace-network', {
 		negotiated: true,
 		id: 42
 	});

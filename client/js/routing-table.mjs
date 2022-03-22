@@ -40,4 +40,27 @@ export async function route(path, msgOrData) {
 	throw new Error('TODO: return path unreachable');
 }
 
+export function insert_route(peer_id, channel) {
+	const old_route = routing_table.get(peer_id);
+	if (old_route) {
+		old_route.close();
+	}
+	routing_table.set(peer_id, channel);
+	function clear_route() {
+		const old_route = routing_table.get(peer_id);
+		if (old_route == channel) {
+			console.log("lost connection to: ", peer_id);
+			routing_table.delete(peer_id);
+		}
+	}
+	// Listen to websockets closing:
+	channel.onclose = clear_route;
+	// Listen to RTCDataChannels disconnecting / failing
+	channel.onconnectionstatechange = () => {
+		if (channel.connectionState == 'failed') {
+			clear_route();
+		}
+	};
+}
+
 // The finite routing table space needs to be shared between DHT, GossipSub, etc.  While a connection might be quite important from a DHT distance perspective, it might not be useful with respect ot the topics we're subscribed to, or it might not have any of the same distributed applications running on it that we are running.
