@@ -1,22 +1,21 @@
 // import { openDB, deleteDB, wrap, unwrap } from 'https://cdn.jsdelivr.net/npm/idb/+esm';
 import { min_connections } from "./network-props.mjs";
-import { routing_table, connection_table, route } from "./routing-table.mjs";
+import { routing_table, route, cleanup_connection_table } from "./routing-table.mjs";
 import { bootstrap } from "./bootstrap.mjs";
-import { publicKey_encoded } from "./peer-id.mjs";
-import { sign_message, verify_message} from "./messages.mjs";
-
-await bootstrap();
 
 async function heartbeat() {
-	if (routing_table.size < min_connections && routing_table.size > 0) {
+	cleanup_connection_table();
+
+	if (routing_table.size < 1) {
+		await bootstrap();
+	} else if (routing_table.size < min_connections) {
 		// Find a random peer and see who they're connected to.
 		const keys = Array.from(routing_table.keys());
 		const key = keys[Math.trunc(Math.random() * keys.length)];
-		const route = routing_table.get(key);
-		route.send(await sign_message({
+		await route([key], {
 			type: 'query',
 			routing_table: true
-		}));
+		});
 	}
 
 	console.log("Heartbeat Finished.");

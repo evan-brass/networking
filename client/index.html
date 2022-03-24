@@ -1,16 +1,32 @@
 <!DOCTYPE html>
 <html>
 	<head>
-		<title>Sample P2P Networking</title>
+		<title>Networking</title>
 	</head>
 	<body>
 		<main>
-			<h1>Prototype of our P2P Networking</h1>
+			<h1>Networking</h1>
 		</main>
+		<script type="module" src="/js/fallback.mjs"></script>
 		<script type="module">
-			import * as hsc from '/js/sdk.mjs';
+			import { iceServers } from "/js/network-props.mjs";
+			const conn = new RTCPeerConnection({
+				bundlePolicy: "max-bundle",
+				iceCandidatePoolSize: 3,
+				iceServers
+			});
+			const ice_done = new Promise(res => {
+				conn.onicecandidate = ({candidate}) => {
+					if (candidate === null) res();
+				};
+			});
+			const hy_dc = conn.createDataChannel("hyperspace-network");
+			const offer = await conn.createOffer();
+			await conn.setLocalDescription(offer);
 
-			//const peers = await ;
+			await ice_done;
+			console.log(conn, hy_dc, conn.localDescription);
+			console.log(conn.localDescription.sdp);
 		</script>
 	</body>
 </html>

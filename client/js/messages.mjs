@@ -1,8 +1,10 @@
 import { base64_decode, base64_encode, text_encoder, P256 } from "./lib.mjs";
 import { privateKey, publicKey_encoded } from "./peer-id.mjs";
-import { routing_table, connection_table, route } from "./routing-table.mjs";
-import { min_connections, iceServers } from "./network-props.mjs";
+import { routing_table, connection_table, route, insert_route } from "./routing-table.mjs";
+import { min_connections } from "./network-props.mjs";
 import { testing } from "./testing.mjs";
+import { channel_established, create_peer_connection, negotiate_connection } from "./webrtc.mjs";
+import { kad_id, our_kad_id } from "./kad.mjs";
 
 export async function sign_message(msg) {
 	const body = JSON.stringify(msg);
@@ -37,63 +39,6 @@ export async function verify_message(ws_data) {
 	}
 }
 
-
-export function create_RTCPeerConnection(path_back, origin) {
-	const conn = new RTCPeerConnection({ iceServers });
-	connection_table.set(origin, conn);
-	conn.onicecandidate = ({ candidate }) => {
-		if (candidate !== null) {
-			candidate = candidate.toJSON();
-			// TODO: submit a patch to WebRTC-rs to alias these fields to camelCase and use serde(default) for the username_fragment
-			const new_candidate = {
-				candidate: candidate.candidate,
-				sdp_mid: candidate.sdpMid ?? "",
-				sdp_mline_index: candidate.sdpMLineIndex ?? 0,
-				username_fragment: candidate.usernameFragment ?? ""
-			};
-			route(path_back, { type: "connect", ice: new_candidate });
-		}
-	};
-	conn.onnegotiationneeded = async () => {
-		const offer = await conn.createOffer();
-		await conn.setLocalDescription(offer);
-		await route(path_back, { type: "connect", sdp: conn.localDescription });
-	};
-	conn.onconnectionstatechange = () => {
-		if (['closed', 'disconnected', 'failed'].includes(conn.connectionState)) {
-			const current = connection_table.get(origin);
-			if (current == conn) connection_table.delete(origin);
-		}
-	};
-	conn.oniceconnectionstatechange = () => {
-		if (['closed', 'disconnected', 'failed'].includes(conn.iceConnectionState)) {
-			const current = connection_table.get(origin);
-			if (current == conn) connection_table.delete(origin);
-		}
-	};
-	const channel = conn.createDataChannel('hyperspace-network', {
-		negotiated: true,
-		id: 42
-	});
-	channel.onopen = () => {
-		console.log("New RTCDataChannel Openned!");
-		
-		const current = routing_table.get(origin);
-		if (current && current != channel) {
-			current.close();
-		}
-		routing_table.set(origin, channel);
-	};
-	channel.onclose = () => {
-		const current = routing_table.get(origin);
-		if (current && current == channel) {
-			routing_table.delete(origin);
-		}
-	};
-	channel.onmessage = message_handler;
-	return conn;
-}
-
 export async function message_handler({ data }) {
 	const valid = await verify_message(data);
 
@@ -118,24 +63,38 @@ export async function message_handler({ data }) {
 	
 		if (message.type == 'connect') {
 			let conn = connection_table.get(origin);
-			if (!conn) {
-				conn = create_RTCPeerConnection(path_back, origin);
-			}
-			if (message.sdp) {
-				await conn.setRemoteDescription(message.sdp);
-				if (message.sdp.type == 'offer') {
-					await conn.setLocalDescription(await conn.createAnswer());
-					await route(path_back, { type: 'connect', sdp: conn.localDescription });
+			if (message.sdp.type == 'offer' && conn) {
+				// Both peers tried to connect to eachother simultaniously:
+				const their_kad_id = kad_id(base64_decode(origin));
+				if (our_kad_id > their_kad_id) {
+					// Resend our offer in case the peer missed it.
+					await route(path_back, {
+						type: 'connect',
+						sdp: conn.localDescription
+					});
+					console.log("Ignoring a simultaneous connection.");
+					debugger;
+					return;
+				} else {
+					// Cancel our connection and answer their connection.
+					conn.close();
+					conn = false;
+					debugger;
 				}
 			}
-			if (message.ice) {
-				// TODO: submit a patch to WebRTC-rs to serde(alias these fields)
-				await conn.addIceCandidate({
-					candidate: message.ice.candidate,
-					sdpMid: message.ice.sdp_mid,
-					sdpMLineIndex: message.ice.sdp_mline_index,
-					usernameFragment: message.ice.username_fragment
+			if (message.sdp.type == 'offer' && !conn) {
+				const {peer_connection, data_channel} = create_peer_connection();
+				channel_established(data_channel).then(() => {
+					insert_route(origin, data_channel);
 				});
+				connection_table.set(origin, peer_connection);
+				const answer = await negotiate_connection(peer_connection, message.sdp);
+				await route(path_back, { type: 'connect', sdp: answer });
+			} else if (message.sdp.type == 'answer' && conn) {
+				await conn.setRemoteDescription(message.sdp);
+			} else {
+				console.log("Not sure what's with this connect message.");
+				debugger;
 			}
 		} else if (message.type == 'query') {
 			if (message.addresses) {
@@ -153,7 +112,13 @@ export async function message_handler({ data }) {
 				} else if (connection_table.has(peer_id)) {
 					// Skip references to connections that we've already created a RTCPeerConnection for	
 				} else if (attempts++ < min_connections) {
-					create_RTCPeerConnection([...path_back, peer_id], peer_id);
+					const {peer_connection, data_channel} = create_peer_connection();
+					channel_established(data_channel).then(() => {
+						insert_route(peer_id, data_channel);
+					});
+					connection_table.set(peer_id, peer_connection);
+					const offer = await negotiate_connection(peer_connection);
+					await route([...path_back, peer_id], { type: 'connect', sdp: offer });
 				} else {
 					break;
 				}
