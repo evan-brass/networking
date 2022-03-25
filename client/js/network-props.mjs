@@ -9,15 +9,15 @@ export const seed_addresses = [
  * The definition is based on the implementation at: https://npmjs.com/package/bittorrent-tracker
  */
 export const webtorrent_trackers = [
-	"wss://tracker.btorrent.xyz",
-	"wss://tracker.fastcast.nz",
+	// "wss://tracker.btorrent.xyz",
+	// "wss://tracker.fastcast.nz",
 	"wss://tracker.files.fm:7073/announce",
 	// "wss://tracker.openwebtorrent.com",
 	// List of trackers: https://github.com/ngosang/trackerslist/blob/master/trackers_all_ws.txt
 ];
 export const seed_info_hashes = [
 	"¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v",
-	"[\fç\\ZÚ\x19#»w\x98BpË'Ú£@£»"
+	// "[\fç\\ZÚ\x19#»w\x98BpË'Ú£@£»"
 ];
 
 export const min_connections = 5;

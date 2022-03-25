@@ -1,12 +1,11 @@
 import { sign_message, verify_message, message_handler } from "./messages.mjs";
 import { iceServers } from "./network-props.mjs";
-import { connection_table } from "./routing-table.mjs";
 import { publicKey_encoded, privateKey } from "./peer-id.mjs";
 import { base64_decode, base64_encode, P256 } from "./lib.mjs";
 import { our_kad_id, kad_id } from "./kad.mjs";
 
 
-// We use a special SDP attribute to identify the rtcpeer connection:
+// We use a special SDP attribute to identify the rtcpeerconnection:
 // a=hy-sig:<base64-public-key>.<base64 sec-1 signature>
 function get_fingerprints_bytes(sdp) {
 	const fingerprint_regex = /^a=fingerprint:sha-256 (.+)/gm;
@@ -66,8 +65,9 @@ export class PeerConnection extends RTCPeerConnection {
 			const hy_datachannel = this.createDataChannel('hyperspace-network');
 			hy_datachannel.onopen = () => {
 				this.#hn_dc = hy_datachannel;
+				this.#hn_dc.onopen = undefined;
+				this.#hn_dc.addEventListener('message', message_handler);
 				console.log("New Connection:", this.other_id);
-				hy_datachannel.onopen = undefined;
 			};
 
 			const offer = await this.createOffer();
@@ -120,6 +120,7 @@ export class PeerConnection extends RTCPeerConnection {
 	#ondatachannel({ channel }) {
 		if (channel.label == 'hyperspace-network') {
 			this.#hn_dc = channel;
+			this.#hn_dc.addEventListener('message', message_handler);
 			console.log("New Connection:", this.other_id);
 		}
 	}

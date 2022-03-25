@@ -19,6 +19,19 @@ for (const tracker of webtorrent_trackers) {
         ws.onopen = async () => {
             ws.onmessage = async ({data}) => {
                 const msg = JSON.parse(data);
+                console.log('track', msg);
+                if (msg.interval) {
+                    setInterval(() => {
+                        if (ws.readyState == ws.OPEN) {
+                            ws.send(JSON.stringify({
+                                action: 'announce',
+                                peer_id, info_hash: msg.info_hash,
+                                numwant: 1, // TODO: create more offers?
+                                event: 'completed', downloaded: 600, left: 0, uploaded: 0
+                            }));
+                        }
+                    }, 1000 * msg.interval);
+                }
                 if (msg.offer) {
                     const pc = new PeerConnection();
                     peer_conns.set(msg.offer_id, pc);
