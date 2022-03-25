@@ -7,8 +7,8 @@
 		<main>
 			<h1>Networking</h1>
 		</main>
-		<script type="module" src="/js/fallback.mjs"></script>
-		<script type="module">
+		<script type="_module" src="/js/fallback.mjs"></script>
+		<script type="_module">
 			import { iceServers } from "/js/network-props.mjs";
 			const conn = new RTCPeerConnection({
 				bundlePolicy: "max-bundle",
@@ -28,5 +28,6 @@
 			console.log(conn, hy_dc, conn.localDescription);
 			console.log(conn.localDescription.sdp);
 		</script>
+		<script type="module" src="/js/temp.mjs"></script>
 	</body>
 </html>

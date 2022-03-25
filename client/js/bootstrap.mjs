@@ -1,7 +1,7 @@
 import { seed_addresses, webtorrent_trackers, seed_info_hashes } from "./network-props.mjs";
 import { connection_table, insert_route } from "./routing-table.mjs";
 import { stream } from "./lib.mjs";
-import { create_peer_connection, negotiate_connection, identify_connection, channel_established } from "./webrtc.mjs";
+import { create_peer_connection, negotiate_connection, identify_connection, channel_established, PeerConnection } from "./webrtc.mjs";
 
 // Currently, bootstrapping is a one time thing that happens before the sdk loads.
 // TODO: make it so that bootstrapping automatically happens when we have no active peers in our
