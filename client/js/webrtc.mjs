@@ -1,4 +1,4 @@
-import { sign_message, verify_message, message_handler } from "./messages.mjs";
+import { message_handler } from "./messages.mjs";
 import { iceServers } from "./network-props.mjs";
 import { publicKey_encoded, privateKey } from "./peer-id.mjs";
 import { base64_decode, base64_encode, P256 } from "./lib.mjs";
@@ -6,7 +6,7 @@ import { our_kad_id, kad_id } from "./kad.mjs";
 
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
-// a=hy-sig:<base64-public-key>.<base64 sec-1 signature>
+// s=<base64-public-key>.<base64 sec-1 signature>
 function get_fingerprints_bytes(sdp) {
 	const fingerprint_regex = /^a=fingerprint:sha-256 (.+)/gm;
 	
@@ -31,6 +31,8 @@ async function mung_sdp({type, sdp}) {
  */
 export class PeerConnection extends RTCPeerConnection {
 	#hn_dc = null;
+	#polite = false;
+	#connecting_timeout = false;
 	static connections = new Set();
 	#making_offer = false;
 	constructor() {
@@ -42,26 +44,34 @@ export class PeerConnection extends RTCPeerConnection {
 
 		this.ondatachannel = this.#ondatachannel.bind(this);
 		this.onconnectionstatechange = this.#onconnectionstatechange.bind(this);
-		// this.onnegotiationneeded = this.#onnegotiationneeded.bind(this);
 
-		// Cleanup this peerconnection if it fails to connect within 5 seconds
-		// This can happen if it was an offer given to a webtorrent tracker which was never forwarded, or if 
-		setTimeout(() => {
-			if (!this.other_id || this.connectionState !== 'connected') {
-				console.warn("Connection closed due to timeout:", this.signalingState);
-				this.close();
-				this.#onconnectionstatechange();
-			}
-		}, 5000);
+		// Set a timeout so that we don't get a peer connection that lives in new forever.
+		this.#connecting_timeout = setTimeout(this.#abandon.bind(this), 5000);
 
 		PeerConnection.connections.add(this);
 	}
+	#abandon() {
+		this.close();
+		this.#onconnectionstatechange();
+	}
 	#onconnectionstatechange() {
-		if (this.connectionState == 'closed' || this.connectionState == 'failed') {
+		if (this.#connecting_timeout) {
+			clearTimeout(this.#connecting_timeout);
+			this.#connecting_timeout = false;
+		}
+		if (this.connectionState == 'failed') {
+			this.#abandon();
+		}
+		if (this.connectionState == 'connecting') {
+			// Set a timeout so that we don't get a peer connection that lives in connecting forever.
+			this.#connecting_timeout = setTimeout(this.#abandon.bind(this), 5000);
+		}
+		if (this.connectionState == 'closed') {
 			// Cleanup as much as we can:
 			PeerConnection.connections.delete(this);
 			this.ondatachannel = undefined;
 			this.onconnectionstatechange = undefined;
+			if (this.#hn_dc) this.#hn_dc.onmessage = undefined;
 		}
 	}
 	get_hn_dc() {
@@ -90,7 +100,7 @@ export class PeerConnection extends RTCPeerConnection {
 			hy_datachannel.onopen = () => {
 				this.#hn_dc = hy_datachannel;
 				this.#hn_dc.onopen = undefined;
-				this.#hn_dc.addEventListener('message', message_handler);
+				this.#hn_dc.onmessage = message_handler;
 				console.log("New Connection:", this.other_id);
 			};
 
@@ -115,17 +125,17 @@ export class PeerConnection extends RTCPeerConnection {
 			throw new Error("The signature in the offer didn't match the DTLS fingerprint.");
 		}
 
-		const their_kad_id = kad_id(public_key_bytes);
-		const polite = our_kad_id < their_kad_id;
-
 		// Check to make sure that we don't switch what peer is on the other side of this connection.
 		if (this.other_id && this.other_id !== public_key_str) {
 			throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
 		}
 		this.other_id = public_key_str;
+		
+		const their_kad_id = kad_id(public_key_bytes);
+		this.#polite = our_kad_id < their_kad_id;
 
 		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
-		if (polite || !offer_collision) {
+		if (this.#polite || !offer_collision) {
 			// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
 			await this.setRemoteDescription({ type, sdp });
 			if (type == 'offer') {
@@ -137,9 +147,10 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	#ondatachannel({ channel }) {
 		if (channel.label == 'hyperspace-network') {
-			this.#hn_dc = channel;
-			this.#hn_dc.addEventListener('message', message_handler);
+			// This channel might be immediately closed, but we still want to handle any messages that come over it.
+			channel.onmessage = message_handler;
 			console.log("New Connection:", this.other_id);
+			this.#hn_dc = channel;
 		}
 	}
 	static async handle_connect(origin, description) {
@@ -155,78 +166,4 @@ export class PeerConnection extends RTCPeerConnection {
 		pc.other_id = origin;
 		return pc.negotiate(description);
 	}
-}
-
-// Send an address message to the connection and wait until we've received an address message so that we know who is on the other end.
-export function identify_connection(channel) {
-	return new Promise((resolve, reject) => {
-		channel.addEventListener('open', async () => {
-			channel.send(await sign_message({
-				type: 'addresses',
-				addresses: []
-			}));
-		});
-		channel.addEventListener('close', reject);
-		channel.addEventListener('error', reject);
-		channel.onmessage = async ({ data }) => {
-			const valid = await verify_message(data);
-			if (valid) {
-				const {origin} = valid;
-				resolve(origin);
-				channel.onmessage = null;
-				channel.addEventListener('message', message_handler);
-				message_handler({ data });
-			}
-		};
-	});
-}
-
-export function channel_established(channel) {
-	return new Promise((resolve, reject) => {
-		channel.addEventListener('open', resolve);
-		channel.addEventListener('close', reject);
-	});
-}
-
-export function create_peer_connection() {
-	const peer_connection = new RTCPeerConnection({ iceServers });
-	const data_channel = peer_connection.createDataChannel('hyperspace-network', {
-		negotiated: true,
-		id: 42
-	});
-	setTimeout(() => {
-		if (peer_connection.connectionState == 'disconnected' || peer_connection.connectionState == 'failed') {
-			data_channel.close();
-			peer_connection.close();
-		}
-	}, 5000);
-	data_channel.addEventListener('close', () => peer_connection.close());
-	data_channel.addEventListener('error', () => peer_connection.close());
-	// peer_connection.onconnectionstatechange = () => console.log('conn state', peer_connection.connectionState);
-	// peer_connection.onicegatheringstatechange = () => console.log('icegather state', peer_connection.iceConnectionState);
-	// peer_connection.onnegotiationneeded = () => console.log('negotiation needed');
-	// peer_connection.onsignalingstatechange = () => console.log('signal state', peer_connection.signalingState);
-	return {peer_connection, data_channel};
-}
-
-export async function negotiate_connection(peer_connection, offer = false) {
-	const ice_done = new Promise(res => {
-		peer_connection.onicecandidate = ({candidate}) => {
-			if (candidate == null) res();
-		}
-	});
-	if (offer) {
-		// We're answering an existing connection
-		peer_connection.setRemoteDescription(offer);
-		const answer = await peer_connection.createAnswer();
-		await peer_connection.setLocalDescription(answer);
-	} else {
-		// This connection will be offered to other peers by the tracker
-		const offer = await peer_connection.createOffer();
-		await peer_connection.setLocalDescription(offer);
-	}
-	// Wait for ice gather to complete before returning the offer / answer;
-	await ice_done;
-
-	return peer_connection.localDescription;
 }

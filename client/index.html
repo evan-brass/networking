@@ -8,26 +8,5 @@
 			<h1>Networking</h1>
 		</main>
 		<script type="module" src="/js/fallback.mjs"></script>
-		<script type="_module">
-			import { iceServers } from "/js/network-props.mjs";
-			const conn = new RTCPeerConnection({
-				bundlePolicy: "max-bundle",
-				iceCandidatePoolSize: 3,
-				iceServers
-			});
-			const ice_done = new Promise(res => {
-				conn.onicecandidate = ({candidate}) => {
-					if (candidate === null) res();
-				};
-			});
-			const hy_dc = conn.createDataChannel("hyperspace-network");
-			const offer = await conn.createOffer();
-			await conn.setLocalDescription(offer);
-
-			await ice_done;
-			console.log(conn, hy_dc, conn.localDescription);
-			console.log(conn.localDescription.sdp);
-		</script>
-		<script type="_module" src="/js/temp.mjs"></script>
 	</body>
 </html>
