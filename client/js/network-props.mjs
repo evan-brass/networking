@@ -11,8 +11,10 @@ export const seed_addresses = [
 export const webtorrent_trackers = [
 	// "wss://tracker.btorrent.xyz",
 	// "wss://tracker.fastcast.nz",
-	"wss://tracker.files.fm:7073/announce",
+	// "wss://tracker.files.fm:7073/announce",
 	// "wss://tracker.openwebtorrent.com",
+	// "ws://tracker.files.fm:7072/announce",
+	"wss://qot.abiir.top:443/announce",
 	// List of trackers: https://github.com/ngosang/trackerslist/blob/master/trackers_all_ws.txt
 ];
 export const seed_info_hashes = [

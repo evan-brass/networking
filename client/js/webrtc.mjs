@@ -44,7 +44,30 @@ export class PeerConnection extends RTCPeerConnection {
 		this.onconnectionstatechange = this.#onconnectionstatechange.bind(this);
 		// this.onnegotiationneeded = this.#onnegotiationneeded.bind(this);
 
+		// Cleanup this peerconnection if it fails to connect within 5 seconds
+		// This can happen if it was an offer given to a webtorrent tracker which was never forwarded, or if 
+		setTimeout(() => {
+			if (!this.other_id || this.connectionState !== 'connected') {
+				console.warn("Connection closed due to timeout:", this.signalingState);
+				this.close();
+				this.#onconnectionstatechange();
+			}
+		}, 5000);
+
 		PeerConnection.connections.add(this);
+	}
+	#onconnectionstatechange() {
+		if (this.connectionState == 'closed' || this.connectionState == 'failed') {
+			// Cleanup as much as we can:
+			PeerConnection.connections.delete(this);
+			this.ondatachannel = undefined;
+			this.onconnectionstatechange = undefined;
+		}
+	}
+	get_hn_dc() {
+		if (this.#hn_dc?.readyState == 'open') {
+			return this.#hn_dc;
+		}
 	}
 	#ice_done() {
 		return new Promise(res => {
@@ -59,6 +82,7 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	async negotiate({ type, sdp } = {}) {
 		if (type === undefined) {
+			// Negotiate will be called without a description when we are initiating a connection to another peer, or when we are generating offers for webtorrent trackers.
 			this.#making_offer = true;
 			// This is a brand new connection - add our data channel and make an offer:
 			// We're creating an offer.  We want our offer to include an SCTP for our data channelss
@@ -70,8 +94,7 @@ export class PeerConnection extends RTCPeerConnection {
 				console.log("New Connection:", this.other_id);
 			};
 
-			const offer = await this.createOffer();
-			await this.setLocalDescription(offer);
+			await this.setLocalDescription();
 			await this.#ice_done();
 			this.#making_offer = false;
 			return mung_sdp(this.localDescription);
@@ -106,15 +129,10 @@ export class PeerConnection extends RTCPeerConnection {
 			// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
 			await this.setRemoteDescription({ type, sdp });
 			if (type == 'offer') {
-				const answer = await this.createAnswer();
-				await this.setLocalDescription(answer);
+				await this.setLocalDescription();
+				await this.#ice_done();
 				return mung_sdp(this.localDescription);
 			}
-		}
-	}
-	#onconnectionstatechange() {
-		if (this.connectionState == 'closed' || this.connectionState == 'failed') {
-			PeerConnection.connections.delete(this);
 		}
 	}
 	#ondatachannel({ channel }) {
@@ -123,6 +141,19 @@ export class PeerConnection extends RTCPeerConnection {
 			this.#hn_dc.addEventListener('message', message_handler);
 			console.log("New Connection:", this.other_id);
 		}
+	}
+	static async handle_connect(origin, description) {
+		// Find the peerconnection that has origin and try to negotiate it:
+		for (const pc of PeerConnection.connections) {
+			if (pc.other_id == origin) {
+				return await pc.negotiate(description);
+			}
+		}
+
+		// If there is no active peer connection, and this is an offer, then create one.
+		const pc = new PeerConnection();
+		pc.other_id = origin;
+		return pc.negotiate(description);
 	}
 }
 

@@ -1,9 +1,9 @@
 import { base64_decode, base64_encode, text_encoder, P256 } from "./lib.mjs";
 import { privateKey, publicKey_encoded } from "./peer-id.mjs";
-import { routing_table, connection_table, route, insert_route } from "./routing-table.mjs";
+import { get_peer_id_set, get_routing_table, route } from "./routing-table.mjs";
 import { min_connections } from "./network-props.mjs";
 import { testing } from "./testing.mjs";
-import { channel_established, create_peer_connection, negotiate_connection } from "./webrtc.mjs";
+import { PeerConnection } from "./webrtc.mjs";
 import { kad_id, our_kad_id } from "./kad.mjs";
 
 export async function sign_message(msg) {
@@ -62,63 +62,35 @@ export async function message_handler({ data }) {
 		}
 	
 		if (message.type == 'connect') {
-			let conn = connection_table.get(origin);
-			if (message.sdp.type == 'offer' && conn) {
-				// Both peers tried to connect to eachother simultaniously:
-				const their_kad_id = kad_id(base64_decode(origin));
-				if (our_kad_id > their_kad_id) {
-					// Resend our offer in case the peer missed it.
-					await route(path_back, {
-						type: 'connect',
-						sdp: conn.localDescription
-					});
-					console.log("Ignoring a simultaneous connection.");
-					debugger;
-					return;
-				} else {
-					// Cancel our connection and answer their connection.
-					conn.close();
-					conn = false;
-					debugger;
-				}
-			}
-			if (message.sdp.type == 'offer' && !conn) {
-				const {peer_connection, data_channel} = create_peer_connection();
-				channel_established(data_channel).then(() => {
-					insert_route(origin, data_channel);
+			const ret_description = await PeerConnection.handle_connect(origin, message.sdp);
+			if (ret_description) {
+				await route(path_back, {
+					type: 'connect',
+					sdp: ret_description
 				});
-				connection_table.set(origin, peer_connection);
-				const answer = await negotiate_connection(peer_connection, message.sdp);
-				await route(path_back, { type: 'connect', sdp: answer });
-			} else if (message.sdp.type == 'answer' && conn) {
-				await conn.setRemoteDescription(message.sdp);
-			} else {
-				console.log("Not sure what's with this connect message.");
-				debugger;
 			}
 		} else if (message.type == 'query') {
 			if (message.addresses) {
 				await route(path_back, { type: 'addresses', addresses: [] });
 			}
 			if (message.routing_table) {
+				const routing_table = get_routing_table();
 				const peers = Array.from(routing_table.keys());
 				await route(path_back, { type: 'routing_table', peers })
 			}
 		} else if (message.type == 'routing_table') {
-			let attempts = routing_table.size;
+			const peer_set = get_peer_id_set();
+			let attempts = peer_set.size;
 			for (const peer_id of message.peers ?? []) {
 				if (peer_id == publicKey_encoded) {
 					// Skip references to ourself
-				} else if (connection_table.has(peer_id)) {
-					// Skip references to connections that we've already created a RTCPeerConnection for	
+				} else if (peer_set.has(peer_id)) {
+					// Skip references to connections that we've already created a PeerConnection for	
 				} else if (attempts++ < min_connections) {
-					const {peer_connection, data_channel} = create_peer_connection();
-					channel_established(data_channel).then(() => {
-						insert_route(peer_id, data_channel);
-					});
-					connection_table.set(peer_id, peer_connection);
-					const offer = await negotiate_connection(peer_connection);
-					await route([...path_back, peer_id], { type: 'connect', sdp: offer });
+					const pc = new PeerConnection();
+					pc.other_id = peer_id;
+					const ret_description = await pc.negotiate();
+					await route([...path_back, peer_id], { type: 'connect', sdp: ret_description });
 				} else {
 					break;
 				}
