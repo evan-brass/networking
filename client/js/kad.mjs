@@ -1,5 +1,4 @@
-import { publicKey_encoded } from "./peer-id.mjs";
-import { base64_decode } from "./lib.mjs";
+import { base64_decode, uint8array_to_bigint } from "./lib.mjs";
 
 /**
  * The Hyperspace network is an overlay network: our connections exist over the internet.
@@ -25,20 +24,14 @@ import { base64_decode } from "./lib.mjs";
  * independant protocols (seperate protobuf schemas).
  */
 
-export async function kad_id_sha1(buffer) {
-	const hash = new Uint8Array(await crypto.subtle.digest('SHA-1', buffer));
-	return kad_id(hash);
-}
-export function kad_id(buffer) {
-	const temp = '0x' + buffer.map(e => e.toString(16).padStart(2, '0')).join('');
-	return BigInt(temp);
+export async function make_kad_id(buffer) {
+	const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
+	return uint8array_to_bigint(hash);
 }
 export function kad_dst(a, b) {
 	console.assert(typeof a == 'bigint');
 	console.assert(typeof b == 'bigint');
 	return a ^ b;
 }
-
-export const our_kad_id = await kad_id(base64_decode(publicKey_encoded));
 
 const buckets = [];

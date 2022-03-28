@@ -1,6 +1,6 @@
-import { publicKey_encoded } from "./peer-id.mjs";
 import { sign_message } from "./messages.mjs";
 import { PeerConnection } from "./webrtc.mjs";
+import { our_peerid } from "./peer-id.mjs";
 
 export function get_routing_table() {
 	// This time around, I'm trying to have the routing table be a snapshot of the current connections.  In the future when more complex routing is needed it can't be that way (we may need to store routing paths not just datachannels) but we'll cross that bridge when we come to it.
@@ -30,7 +30,7 @@ export async function route(path, msgOrData) {
 	const routing_table = get_routing_table();
 	for (let i = path.length - 1; i >= 0; --i) {
 		const peer_id = path[i];
-		if (peer_id == publicKey_encoded) {
+		if (peer_id == our_peerid) {
 			// If we reach our own public_key then abort so that we don't route the message backwards.
 			break;
 		} else if (routing_table.has(peer_id)) {
@@ -39,7 +39,7 @@ export async function route(path, msgOrData) {
 				if (typeof msgOrData !== 'string' && i < path.length - 1) {
 					msgOrData = {
 						type: 'source_route',
-						path: path.slice(i),
+						path: path.slice(i).map(pid => pid.public_key_encoded),
 						content: msgOrData
 					};
 				}

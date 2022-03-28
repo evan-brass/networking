@@ -27,19 +27,3 @@ async function heartbeat() {
 	setTimeout(heartbeat, 3000);
 }
 heartbeat();
-
-if (window.parent === null) {
-	throw new Error("The fallback hyperspace-client should be embedded in an iframe by the distributed web app.");
-}
-
-const {port1: app_port, port2} = new MessageChannel();
-
-// Send half of the message channel to the app
-window.parent.postMessage({
-	hyperspace_client_message_port: port2
-}, "*", [port2]);
-
-// Handle messageson the app_port:
-app_port.onmessage = ({ data, origin }) => {
-	console.log(origin, data);
-};

@@ -1,8 +1,7 @@
 import { message_handler } from "./messages.mjs";
 import { iceServers } from "./network-props.mjs";
-import { publicKey_encoded, privateKey } from "./peer-id.mjs";
+import { privateKey, PeerId, our_peerid } from "./peer-id.mjs";
 import { base64_decode, base64_encode, P256 } from "./lib.mjs";
-import { our_kad_id, kad_id } from "./kad.mjs";
 
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
@@ -22,7 +21,7 @@ async function mung_sdp({type, sdp}) {
 	// Modify the offer with a signature of our DTLS fingerprint:
 	const fingerprints_bytes = get_fingerprints_bytes(sdp);
 	const signature = await crypto.subtle.sign(P256, privateKey, fingerprints_bytes);
-	sdp = sdp.replace(/^s=.+/gm, `s=${publicKey_encoded}.${base64_encode(new Uint8Array(signature))}`);
+	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${base64_encode(new Uint8Array(signature))}`);
 	return {type, sdp};
 }
 
@@ -30,10 +29,10 @@ async function mung_sdp({type, sdp}) {
  * Our peer connection is a special RTCPeerConnection that also manages the RTCDataChannel for the hyperspace-network, as well as any other datachannels that are signalled (For GossipSub, or blockchain needs).  I'm trying to not have a separation between the routing table (peer_id -> websocket | rtcdatachannel) and the peer table (peer_id -> rtcpeerconnection) as that wasn't working very well.
  */
 export class PeerConnection extends RTCPeerConnection {
-	#hn_dc = null;
-	#polite = false;
-	#connecting_timeout = false;
 	static connections = new Set();
+	static events = new EventTarget();
+	#hn_dc = null;
+	#connecting_timeout = false;
 	#making_offer = false;
 	constructor() {
 		super({
@@ -46,11 +45,11 @@ export class PeerConnection extends RTCPeerConnection {
 		this.onconnectionstatechange = this.#onconnectionstatechange.bind(this);
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
-		this.#connecting_timeout = setTimeout(this.#abandon.bind(this), 5000);
+		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
 
 		PeerConnection.connections.add(this);
 	}
-	#abandon() {
+	abandon() {
 		this.close();
 		this.#onconnectionstatechange();
 	}
@@ -60,11 +59,11 @@ export class PeerConnection extends RTCPeerConnection {
 			this.#connecting_timeout = false;
 		}
 		if (this.connectionState == 'failed') {
-			this.#abandon();
+			this.abandon();
 		}
 		if (this.connectionState == 'connecting') {
 			// Set a timeout so that we don't get a peer connection that lives in connecting forever.
-			this.#connecting_timeout = setTimeout(this.#abandon.bind(this), 5000);
+			this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
 		}
 		if (this.connectionState == 'closed') {
 			// Cleanup as much as we can:
@@ -72,6 +71,9 @@ export class PeerConnection extends RTCPeerConnection {
 			this.ondatachannel = undefined;
 			this.onconnectionstatechange = undefined;
 			if (this.#hn_dc) this.#hn_dc.onmessage = undefined;
+			PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', {
+				detail: this
+			}));
 		}
 	}
 	get_hn_dc() {
@@ -101,7 +103,9 @@ export class PeerConnection extends RTCPeerConnection {
 				this.#hn_dc = hy_datachannel;
 				this.#hn_dc.onopen = undefined;
 				this.#hn_dc.onmessage = message_handler;
-				console.log("New Connection:", this.other_id);
+				PeerConnection.events.dispatchEvent(new CustomEvent('connected', {
+					detail: this
+				}));
 			};
 
 			await this.setLocalDescription();
@@ -118,24 +122,18 @@ export class PeerConnection extends RTCPeerConnection {
 		const result = sig_regex.exec(sdp);
 		if (result == null) throw new Error("Offer didn't include a signature.");
 		const { 1: public_key_str, 2: signature_str } = result;
-		const public_key_bytes = base64_decode(public_key_str);
-		const offer_pk = await crypto.subtle.importKey("raw", public_key_bytes, P256, false, ['verify']);
-		if (!await crypto.subtle.verify(P256, offer_pk, base64_decode(signature_str), fingerprints_bytes)) {
-			debugger;
-			throw new Error("The signature in the offer didn't match the DTLS fingerprint.");
-		}
+		const other_id = await PeerId.from_encoded(public_key_str);
+		const valid = await other_id.verify(base64_decode(signature_str), fingerprints_bytes);
+		if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
 
 		// Check to make sure that we don't switch what peer is on the other side of this connection.
-		if (this.other_id && this.other_id !== public_key_str) {
+		if (this.other_id && this.other_id !== other_id) {
 			throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
 		}
-		this.other_id = public_key_str;
-		
-		const their_kad_id = kad_id(public_key_bytes);
-		this.#polite = our_kad_id < their_kad_id;
+		this.other_id = other_id;
 
 		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
-		if (this.#polite || !offer_collision) {
+		if (this.other_id.polite() || !offer_collision) {
 			// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
 			await this.setRemoteDescription({ type, sdp });
 			if (type == 'offer') {
@@ -149,8 +147,10 @@ export class PeerConnection extends RTCPeerConnection {
 		if (channel.label == 'hyperspace-network') {
 			// This channel might be immediately closed, but we still want to handle any messages that come over it.
 			channel.onmessage = message_handler;
-			console.log("New Connection:", this.other_id);
 			this.#hn_dc = channel;
+			PeerConnection.events.dispatchEvent(new CustomEvent('connected', {
+				detail: this
+			}));
 		}
 	}
 	static async handle_connect(origin, description) {

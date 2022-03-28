@@ -8,6 +8,15 @@ export function base64_decode(string) {
 	);
 }
 
+// Used to create kad_id from a buffer
+export function uint8array_to_bigint(arr) {
+	let temp = '0x';
+	for (const b of arr) {
+		temp += b.toString(16).padStart(2, '0');
+	}
+	return BigInt(temp);
+}
+
 // A shared Text Encoder and Decoder
 export const text_encoder = new TextEncoder();
 export const text_decoder = new TextDecoder("utf-8");
