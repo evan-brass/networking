@@ -52,7 +52,7 @@ export class PeerId {
 			y = y.replace(/-/g, '+').replace(/_/g, '/').padEnd(44, '=');
 			x = atob(x); y = atob(y);
 			const bytes = new Uint8Array((x + y).split('').map(e => e.charCodeAt(0)));
-			kad_id = make_kad_id(bytes);
+			kad_id = await make_kad_id(bytes);
 		}
 		return new PeerId({ public_key, public_key_encoded, kad_id });
 	}

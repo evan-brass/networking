@@ -1,4 +1,4 @@
-import { base64_decode, uint8array_to_bigint } from "./lib.mjs";
+import { uint8array_to_bigint } from "./lib.mjs";
 
 /**
  * The Hyperspace network is an overlay network: our connections exist over the internet.
@@ -35,3 +35,4 @@ export function kad_dst(a, b) {
 }
 
 const buckets = [];
+const sibling_list = [];

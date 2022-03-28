@@ -98,6 +98,7 @@ export class PeerConnection extends RTCPeerConnection {
 			this.#making_offer = true;
 			// This is a brand new connection - add our data channel and make an offer:
 			// We're creating an offer.  We want our offer to include an SCTP for our data channelss
+			// TODO: Use sub-protocols instead of special names?  We could have a subprotocol of hyperspace-kad-json for example?  And hyperspace-kad-protobuf?
 			const hy_datachannel = this.createDataChannel('hyperspace-network');
 			hy_datachannel.onopen = () => {
 				this.#hn_dc = hy_datachannel;
