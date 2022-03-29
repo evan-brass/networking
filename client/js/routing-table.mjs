@@ -17,10 +17,27 @@ const sibling_list_size = 3;
 class RoutingTable {
 	root = new KBucketLeaf(255n, this);
 	sibling_list = [];
-	lookup(kad_id) {
+	should_add(kad_id) {
+		if (this.sibling_list.length < sibling_list_size) return true;
+		const to_self = kad_dst(kad_id, our_peerid.kad_id);
+		const head_dst = kad_dst(this.sibling_list[0], our_peerid.kad_id);
+		if (to_self < head_dst) return true;
+		const tail_dst = kad_dst(this.sibling_list[this.sibling_list.length - 1], our_peerid.kad_id);
+		if (to_self < tail_dst) return true;
+		return false;
+	}
+	lookup(kad_id, ignore_self_distance = false) {
 		// Check the sibling_list first
-		const ret = Array.from(this.sibling_list);
+		let ret = Array.from(this.sibling_list);
 		ret.push(...this.root.lookup(kad_id));
+		// Only return results that are closer to the kad_id than our own peer_id:
+		if (!ignore_self_distance) {
+			const our_dst = kad_dst(kad_id, our_peerid.kad_id);
+			ret = ret.filter(({kad_id: i}) => {
+				const i_dst = kad_dst(kad_id, i);
+				return i_dst < our_dst;
+			});
+		}
 		// Sort the results:
 		ret.sort(({kad_id: a}, {kad_id: b}) => {
 			const dst_a = kad_dst(kad_id, a);
@@ -31,6 +48,7 @@ class RoutingTable {
 				return 1;
 			}
 		});
+
 		return ret.slice(0, num_ret);
 	}
 	insert(kad_id, value) {
@@ -165,18 +183,18 @@ class KBucketLeaf {
 		}
 	}
 }
-const k_buckets = new RoutingTable();
+export const routing_table = new RoutingTable();
 
 // Insert / Remove PeerConnections into our k_buckets
 PeerConnection.events.addEventListener('connected', ({ detail: new_connection }) => {
-	k_buckets.insert(new_connection.other_id.kad_id, new_connection);
-	console.log("added", k_buckets);
+	routing_table.insert(new_connection.other_id.kad_id, new_connection);
+	console.log("added", routing_table);
 	draw_buckets();
 });
 PeerConnection.events.addEventListener('disconnected', ({ detail: old_connection }) => {
 	if (old_connection.other_id) {
-		k_buckets.remove(old_connection.other_id.kad_id);
-		console.log("removed", k_buckets);
+		routing_table.remove(old_connection.other_id.kad_id);
+		console.log("removed", routing_table);
 		draw_buckets();
 	}
 });
@@ -184,7 +202,7 @@ PeerConnection.events.addEventListener('disconnected', ({ detail: old_connection
 const draw_container = document.createElement('div');
 draw_container.classList.add('buckets');
 document.body.appendChild(draw_container);
-function draw_buckets(el = draw_container, node = k_buckets) {
+function draw_buckets(el = draw_container, node = routing_table) {
 	if (node instanceof RoutingTable) {
 		el.innerHTML = `<code style="color: red;">${our_peerid.kad_id.toString(2).padStart(256, '0')}</code><br>`;
 		el.innerHTML += node.sibling_list.map(({kad_id}) => `<code>${kad_id.toString(2).padStart(256, '0')}</code><br>`).join('');
@@ -230,33 +248,19 @@ export function get_peer_id_set() {
 }
 
 // Source route a msg based on a path
-export async function route(path, msgOrData) {
-	const routing_table = get_routing_table();
-	for (let i = path.length - 1; i >= 0; --i) {
-		const peer_id = path[i];
-		if (peer_id == our_peerid) {
-			// If we reach our own public_key then abort so that we don't route the message backwards.
-			break;
-		} else if (routing_table.has(peer_id)) {
-			const route = routing_table.get(peer_id);
-			try {
-				if (typeof msgOrData !== 'string' && i < path.length - 1) {
-					msgOrData = {
-						type: 'source_route',
-						path: path.slice(i).map(pid => pid.public_key_encoded),
-						content: msgOrData
-					};
-				}
-				if (typeof msgOrData !== 'string') {
-					console.log("Send", msgOrData);
-					msgOrData = await sign_message(msgOrData);
-				}
-				route.send(msgOrData);
-				return;
-			} catch (e) { console.error(e); }
+export async function route(destination, msgOrData, ignore_self_distance = false) {
+	const candidates = routing_table.lookup(destination, ignore_self_distance);
+	if (candidates.length > 0) {
+		console.log("send", msgOrData);
+		const {value: closest} = candidates[0];
+		// The candidates are sorted so that the closest to the destination is first:
+		if (typeof msgOrData !== 'string') {
+			msgOrData = await sign_message(msgOrData);
 		}
+		closest.send(msgOrData);
+		return;
 	}
-	throw new Error('TODO: return path unreachable');
+	throw new Error("Path Unreachable");
 }
 
 // The finite routing table space needs to be shared between DHT, GossipSub, etc.  While a connection might be quite important from a DHT distance perspective, it might not be useful with respect ot the topics we're subscribed to, or it might not have any of the same distributed applications running on it that we are running.

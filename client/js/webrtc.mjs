@@ -60,6 +60,13 @@ export class PeerConnection extends RTCPeerConnection {
 			this.abandon();
 		}
 	}
+	send(data) {
+		if (this.#hn_dc?.readyState == 'open') {
+			this.#hn_dc.send(data);
+		} else {
+			throw new Error("The datachannel for this peer connection is not in an open readyState.");
+		}
+	}
 	abandon() {
 		if (this.#hn_dc?.readyState == 'open') {
 			console.warn('Abandoning a peerconnection that is routable:', this);

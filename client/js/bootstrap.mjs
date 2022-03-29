@@ -52,7 +52,7 @@ export function bootstrap() {
 											event: 'completed', downloaded: 600, left: 0, uploaded: 0
 										}));
 									}
-								}, 100 * msg.interval));
+								}, 1000 * msg.interval));
 							}
 							if (msg.offer) {
 								const pc = new PeerConnection();
