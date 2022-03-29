@@ -34,6 +34,8 @@ export class PeerConnection extends RTCPeerConnection {
 	#hn_dc = null;
 	#connecting_timeout = false;
 	#making_offer = false;
+	#claimed = 0;
+	#claimed_timeout = false;
 	constructor() {
 		super({
 			bundlePolicy: "max-bundle", // Bundling is supported by browsers, just not voip-phones and such.
@@ -42,30 +44,51 @@ export class PeerConnection extends RTCPeerConnection {
 		});
 
 		this.ondatachannel = this.#ondatachannel.bind(this);
-		this.onconnectionstatechange = this.#onconnectionstatechange.bind(this);
+		this.oniceconnectionstatechange = this.#oniceconnectionstatechange.bind(this);
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
 
 		PeerConnection.connections.add(this);
 	}
-	abandon() {
-		this.close();
-		this.#onconnectionstatechange();
+	claim() {
+		this.#claimed += 1;
 	}
-	#onconnectionstatechange() {
+	release() {
+		this.#claimed -= 1;
+		if (this.#claimed <= 0 && this.#claimed_timeout == false) {
+			this.abandon();
+		}
+	}
+	abandon() {
+		if (this.#hn_dc?.readyState == 'open') {
+			console.warn('Abandoning a peerconnection that is routable:', this);
+		}
+		this.close();
+		// this.#oniceconnectionstatechange();
+	}
+	#oniceconnectionstatechange() {
 		if (this.#connecting_timeout) {
 			clearTimeout(this.#connecting_timeout);
 			this.#connecting_timeout = false;
 		}
-		if (this.connectionState == 'failed') {
+		if (this.iceConnectionState == 'failed' || this.iceConnectionState == 'disconnected') {
 			this.abandon();
-		}
-		if (this.connectionState == 'connecting') {
+		} else if (this.iceConnectionState == 'checking') {
 			// Set a timeout so that we don't get a peer connection that lives in connecting forever.
 			this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
-		}
-		if (this.connectionState == 'closed') {
+		} else if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') {
+			// Set a timeout so that if this peer connection doesn't get picked up by our routing tables, it gets closed eventually.
+			// The timeout here is a little longer so that if a peer connects to us and tries to bootstrap, it has a little bit of time to do so.
+			if (this.#claimed_timeout == false) {
+				this.#claimed_timeout = setTimeout(() => {
+					if (this.#claimed <= 0) {
+						this.abandon();
+					}
+					this.#claimed_timeout = false;
+				}, 10000);
+			}
+		} if (this.iceConnectionState == 'closed') {
 			// Cleanup as much as we can:
 			PeerConnection.connections.delete(this);
 			this.ondatachannel = undefined;
