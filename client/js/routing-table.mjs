@@ -1,4 +1,3 @@
-import { sign_message } from "./messages.mjs";
 import { PeerConnection } from "./webrtc.mjs";
 import { our_peerid } from "./peer-id.mjs";
 import { kad_dst } from "./kad.mjs";
@@ -245,6 +244,44 @@ export function get_peer_id_set() {
 		}
 	}
 	return peer_set;
+}
+
+export async function source_route(path, data) {
+	const routing_table = get_routing_table();
+	for (let i = path.length - 1; i >= 0; --i) {
+		const peer_id = path[i];
+		if (peer_id == our_peerid) {
+			// If we reach our own public_key then abort so that we don't route the message backwards.
+			break;
+		} else if (routing_table.has(peer_id)) {
+			const route = routing_table.get(peer_id);
+			try {
+				if (typeof msgOrData !== 'string' && i < path.length - 1) {
+					msgOrData = {
+						type: 'source_route',
+						path: path.slice(i).map(pid => pid.public_key_encoded),
+						content: msgOrData
+					};
+				}
+				if (typeof msgOrData !== 'string') {
+					console.log("Send", msgOrData);
+					msgOrData = await sign_message(msgOrData);
+				}
+				route.send(msgOrData);
+				return;
+			} catch (e) { console.error(e); }
+		}
+	}
+	throw new Error('Destination Unreachable');
+}
+export function kad_route(kad_id, data, ignore_self_distance = false) {
+	const closest = routing_table.lookup(kad_id, ignore_self_distance);
+	if (closest.length > 0) {
+		const peer_connection = closest[0].value;
+		peer_connection.send(data);
+	} else {
+		throw new Error('Destination Unreachable');
+	}
 }
 
 // Source route a msg based on a path

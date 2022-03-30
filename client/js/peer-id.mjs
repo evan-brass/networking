@@ -1,12 +1,12 @@
 import { make_kad_id } from "./kad.mjs";
-import { base64_decode, base64_encode, P256 } from "./lib.mjs";
+import { base64_decode, base64_encode, P256, text_decoder, text_encoder } from "./lib.mjs";
 
 /**
  * Peer IDs are ephemeral - they are created fresh each time.
  * Applications that use the Hyperspace Network must have their own method of keeping track of identities.
  * In the future, when we signal RTCPeerConnections on the application's behalf, we'll pass along their 'a=identity:' sdp.
  */
-const {publicKey, privateKey} = await crypto.subtle.generateKey(P256, false, ['sign']);
+const {publicKey, privateKey} = await crypto.subtle.generateKey(P256, false, ['sign', 'verify']);
 let our_peerid;
 
 /**
@@ -28,7 +28,21 @@ export class PeerId {
 		return our_peerid.kad_id < this.kad_id;
 	}
 	async verify(signature, buffer) {
+		if (typeof signature == 'string') {
+			signature = base64_decode(signature);
+		}
+		if (typeof buffer == 'string') {
+			buffer = text_encoder.encode(buffer);
+		}
 		return await crypto.subtle.verify(P256, this.public_key, signature, buffer);
+	}
+	async sign(buffer) {
+		if (this !== our_peerid) throw new Error("We can only sign from our_peerid");
+		if (typeof buffer == 'string') {
+			buffer = text_encoder.encode(buffer);
+		}
+		const signature = await crypto.subtle.sign(P256, privateKey, buffer);
+		return base64_encode(new Uint8Array(signature));
 	}
 	static async from_encoded(public_key_encoded) {
 		let peer_id = PeerId.peer_ids.get(public_key_encoded);
