@@ -34,16 +34,14 @@ export function bootstrap() {
 					ws = new WebSocket(tracker);
 					tracker_conns.set(tracker, ws);
 					ws.onopen = async () => {
-						const intervals = new Map();
+						let interval;
 						ws.onmessage = async ({data}) => {
 							const msg = JSON.parse(data);
 							console.log('track', msg);
 							if (msg.interval) {
-								if (intervals.has(msg.info_hash)) {
-									clearInterval(intervals.get(msg.info_hash));
-									intervals.delete(msg.info_hash);
-								}
-								intervals.set(msg.info_hash, setInterval(() => {
+								if (interval) clearInterval(interval);
+								// Ignore the tracker's interval, they sometimes close the connection before the interval is up, so just re-announce every 45sec.
+								interval = setInterval(() => {
 									if (ws.readyState == ws.OPEN) {
 										ws.send(JSON.stringify({
 											action: 'announce',
@@ -51,8 +49,10 @@ export function bootstrap() {
 											numwant: 1, // TODO: create more offers?
 											event: 'completed', downloaded: 600, left: 0, uploaded: 0
 										}));
+									} else {
+										clearInterval(interval);
 									}
-								}, 1000 * msg.interval));
+								}, 45000);
 							}
 							if (msg.offer) {
 								const pc = new PeerConnection();
