@@ -1,6 +1,6 @@
 // import { openDB, deleteDB, wrap, unwrap } from 'https://cdn.jsdelivr.net/npm/idb/+esm';
 import { min_connections } from "./network-props.mjs";
-import { get_peer_id_set, get_routing_table, route } from "./routing-table.mjs";
+import { get_peer_id_set, get_routing_table } from "./routing-table.mjs";
 import { bootstrap } from "./bootstrap.mjs";
 import { PeerConnection } from "./webrtc.mjs";
 import { our_peerid } from "./peer-id.mjs";

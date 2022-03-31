@@ -34,8 +34,6 @@ export class PeerConnection extends RTCPeerConnection {
 	#hn_dc = null;
 	#connecting_timeout = false;
 	#making_offer = false;
-	#claimed = 0;
-	#claimed_timeout = false;
 	constructor() {
 		super({
 			bundlePolicy: "max-bundle", // Bundling is supported by browsers, just not voip-phones and such.
@@ -43,22 +41,27 @@ export class PeerConnection extends RTCPeerConnection {
 			iceServers
 		});
 
+		// TODO: Add a sub-protocol?
+		// Create the main hyperspace data channel which carries routing and signaling traffic.
+		this.#hn_dc = this.createDataChannel('hyperspace-network', {
+			negotiated: true,
+			id: 42
+		});
+		this.#hn_dc.onopen = () => {
+			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: this }));
+		};
+		this.#hn_dc.onclose = () => {
+			PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: this }));
+		};
+		this.#hn_dc.onmessage = message_handler;
+
 		this.ondatachannel = this.#ondatachannel.bind(this);
 		this.oniceconnectionstatechange = this.#oniceconnectionstatechange.bind(this);
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
-		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
+		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
 
 		PeerConnection.connections.add(this);
-	}
-	claim() {
-		this.#claimed += 1;
-	}
-	release() {
-		this.#claimed -= 1;
-		if (this.#claimed <= 0 && this.#claimed_timeout == false) {
-			this.abandon();
-		}
 	}
 	send(data) {
 		if (this.#hn_dc?.readyState == 'open') {
@@ -72,7 +75,7 @@ export class PeerConnection extends RTCPeerConnection {
 			console.warn('Abandoning a peerconnection that is routable:', this);
 		}
 		this.close();
-		// this.#oniceconnectionstatechange();
+		this.#oniceconnectionstatechange();
 	}
 	#oniceconnectionstatechange() {
 		if (this.#connecting_timeout) {
@@ -87,23 +90,20 @@ export class PeerConnection extends RTCPeerConnection {
 		} else if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') {
 			// Set a timeout so that if this peer connection doesn't get picked up by our routing tables, it gets closed eventually.
 			// The timeout here is a little longer so that if a peer connects to us and tries to bootstrap, it has a little bit of time to do so.
-			if (this.#claimed_timeout == false) {
-				this.#claimed_timeout = setTimeout(() => {
-					if (this.#claimed <= 0) {
-						this.abandon();
-					}
-					this.#claimed_timeout = false;
-				}, 10000);
-			}
+			// if (this.#claimed_timeout == false) {
+			// 	this.#claimed_timeout = setTimeout(() => {
+			// 		if (this.#claimed <= 0) {
+			// 			this.abandon();
+			// 		}
+			// 		this.#claimed_timeout = false;
+			// 	}, 10000);
+			// }
 		} if (this.iceConnectionState == 'closed') {
 			// Cleanup as much as we can:
 			PeerConnection.connections.delete(this);
 			this.ondatachannel = undefined;
 			this.onconnectionstatechange = undefined;
 			if (this.#hn_dc) this.#hn_dc.onmessage = undefined;
-			PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', {
-				detail: this
-			}));
 		}
 	}
 	get_hn_dc() {
@@ -122,22 +122,14 @@ export class PeerConnection extends RTCPeerConnection {
 			this.onicegatheringstatechange();
 		});
 	}
+	// Should really only be used by bootstrap which needs to create peer connections without an other_id
 	async negotiate({ type, sdp } = {}) {
+		// Ignore any changes if the peer connection is closed.
+		if (this.signalingState == 'closed') return;
+
 		if (type === undefined) {
 			// Negotiate will be called without a description when we are initiating a connection to another peer, or when we are generating offers for webtorrent trackers.
 			this.#making_offer = true;
-			// This is a brand new connection - add our data channel and make an offer:
-			// We're creating an offer.  We want our offer to include an SCTP for our data channelss
-			// TODO: Use sub-protocols instead of special names?  We could have a subprotocol of hyperspace-kad-json for example?  And hyperspace-kad-protobuf?
-			const hy_datachannel = this.createDataChannel('hyperspace-network');
-			hy_datachannel.onopen = () => {
-				this.#hn_dc = hy_datachannel;
-				this.#hn_dc.onopen = undefined;
-				this.#hn_dc.onmessage = message_handler;
-				PeerConnection.events.dispatchEvent(new CustomEvent('connected', {
-					detail: this
-				}));
-			};
 
 			await this.setLocalDescription();
 			await this.#ice_done();
@@ -165,6 +157,8 @@ export class PeerConnection extends RTCPeerConnection {
 
 		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
 		if (this.other_id.polite() || !offer_collision) {
+			if (type == 'answer' && this.signalingState == 'stable') return;
+
 			// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
 			await this.setRemoteDescription({ type, sdp });
 			if (type == 'offer') {
@@ -175,14 +169,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 	#ondatachannel({ channel }) {
-		if (channel.label == 'hyperspace-network') {
-			// This channel might be immediately closed, but we still want to handle any messages that come over it.
-			channel.onmessage = message_handler;
-			this.#hn_dc = channel;
-			PeerConnection.events.dispatchEvent(new CustomEvent('connected', {
-				detail: this
-			}));
-		}
+		console.log('new Channel:', channel);
 	}
 	static async handle_connect(origin, description) {
 		// Find the peerconnection that has origin and try to negotiate it:
@@ -195,6 +182,6 @@ export class PeerConnection extends RTCPeerConnection {
 		// If there is no active peer connection, and this is an offer, then create one.
 		const pc = new PeerConnection();
 		pc.other_id = origin;
-		return pc.negotiate(description);
+		return await pc.negotiate(description);
 	}
 }

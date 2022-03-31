@@ -16,31 +16,26 @@ const sibling_list_size = 3;
 class RoutingTable {
 	root = new KBucketLeaf(255n, this);
 	sibling_list = [];
-	should_add(kad_id) {
-		if (this.sibling_list.length < sibling_list_size) return true;
-		const to_self = kad_dst(kad_id, our_peerid.kad_id);
-		const head_dst = kad_dst(this.sibling_list[0], our_peerid.kad_id);
-		if (to_self < head_dst) return true;
-		const tail_dst = kad_dst(this.sibling_list[this.sibling_list.length - 1], our_peerid.kad_id);
-		if (to_self < tail_dst) return true;
-		return false;
+	could_insert(kad_id) {
+		if (this.sibling_list < sibling_list_size) return true;
+		if (this.sibling_list_size > 0) {
+			// Check if this could displace a sibling:
+			const new_dist = kad_dst(our_peerid.kad_id, kad_id);
+			const dist_head = kad_dst(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
+			if (new_dist < dist_head) return true;
+			const dist_tail = kad_dst(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
+			if (new_dist < dist_tail) return true;
+		}
+		return this.root.could_insert(kad_id);
 	}
-	lookup(kad_id, ignore_self_distance = false) {
+	lookup(kad_id) {
 		// Check the sibling_list first
 		let ret = Array.from(this.sibling_list);
 		ret.push(...this.root.lookup(kad_id));
-		// Only return results that are closer to the kad_id than our own peer_id:
-		if (!ignore_self_distance) {
-			const our_dst = kad_dst(kad_id, our_peerid.kad_id);
-			ret = ret.filter(({kad_id: i}) => {
-				const i_dst = kad_dst(kad_id, i);
-				return i_dst < our_dst;
-			});
-		}
 		// Sort the results:
-		ret.sort(({kad_id: a}, {kad_id: b}) => {
-			const dst_a = kad_dst(kad_id, a);
-			const dst_b = kad_dst(kad_id, b);
+		ret.sort((con_a, con_b) => {
+			const dst_a = kad_dst(kad_id, con_a.other_id.kad_id);
+			const dst_b = kad_dst(kad_id, con_b.other_id.kad_id);
 			if (dst_a < dst_b) {
 				return -1;
 			} else {
@@ -50,30 +45,59 @@ class RoutingTable {
 
 		return ret.slice(0, num_ret);
 	}
-	insert(kad_id, value) {
-		// TODO: Insert the kad_id into the sibling list, sort the list, then displace the furthest item from our peer_id if the list is too long.
-		value.claim();
-		this.sibling_list.push({kad_id, value});
-		this.sibling_list.sort(({kad_id: a}, {kad_id: b}) => (a < b) ? -1 : 1);
-
-		if (this.sibling_list.length > sibling_list_size) {
-			const dist_head = kad_dst(our_peerid.kad_id, this.sibling_list[0].kad_id);
-			const dist_tail = kad_dst(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].kad_id);
-			const displaced = (dist_head > dist_tail) ? this.sibling_list.shift() : this.sibling_list.pop();
-			this.root.insert(displaced.kad_id, displaced.value);
+	insert(peer_connection) {
+		// Check if the peer_connection should go into our sibling list:
+		if (this.sibling_list.length < sibling_list_size) {
+			this.sibling_list.push(peer_connection);
+			this.sibling_list.sort((con_a, con_b) => (con_a.other_id.kad_id < con_b.other_id.kad_id) ? -1 : 1);
+			return true;
+		} else if (sibling_list_size > 0) {
+			const new_dist = kad_dst(our_peerid.kad_id, peer_connection.other_id.kad_id);
+			const dist_head = kad_dst(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
+			const dist_tail = kad_dst(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
+			let displaced;
+			if (new_dist < dist_head) {
+				displaced = this.sibling_list.shift();
+				this.sibling_list.unshift(peer_connection);
+			} else if (new_dist < dist_tail) {
+				displaced = this.sibling_list.pop();
+				this.sibling_list.push(peer_connection);
+			} else {
+				return this.root.insert(peer_connection);
+			}
+			this.sibling_list.sort((con_a, con_b) => (con_a.other_id.kad_id < con_b.other_id.kad_id) ? -1 : 1);
+			if (!this.root.insert(displaced)) {
+				// TODO: release the displaced peer_connection
+				displaced.abandon();
+			}
+			return true;
+		} else {
+			return this.root.insert(peer_connection);
 		}
 	}
-	remove(kad_id) {
-		// Remove from the sibling_list and the k_buckets
-		this.sibling_list = this.sibling_list.filter(({kad_id: i, value}) => {
-			if (i == kad_id) {
-				value.release();
-				return false;
-			} else {
-				return true;
+	remove(peer_connection) {
+		const index = this.sibling_list.indexOf(peer_connection);
+		if (index != -1) {
+			this.sibling_list.splice(index, 1);
+			const candidates = this.root.lookup(our_peerid.kad_id);
+			candidates.sort((con_a, con_b) => {
+				const dst_a = kad_dst(our_peerid.kad_id, con_a.other_id.kad_id);
+				const dst_b = kad_dst(our_peerid.kad_id, con_b.other_id.kad_id);
+				if (dst_a < dst_b) {
+					return -1;
+				} else {
+					return 1;
+				}
+			});
+			if (candidates.length > 0) {
+				const new_sibling = candidates[0];
+				this.root.remove(new_sibling);
+				// Reinsert the new_sibling so that it get's put into the sibling list.
+				this.insert(new_sibling);
 			}
-		});
-		this.root.remove(kad_id);
+		} else {
+			this.root.remove(peer_connection);
+		}
 	}
 }
 class KBucketInternal {
@@ -87,27 +111,31 @@ class KBucketInternal {
 		const side = ((kad_id & mask) == 0n) ? this.left : this.right;
 		return side;
 	}
+	could_insert(kad_id) {
+		const side = this.#side(kad_id);
+		return side.could_insert(kad_id);
+	}
 	lookup(kad_id) {
 		const side = this.#side(kad_id);
 		const ret_side = side.lookup(kad_id);
-		if (ret_side.size < k) {
+		if (ret_side.length < k) {
 			// Include results from the other side as well
 			const other_side = (side == this.left) ? this.right : this.left;
 			return [...ret_side, ...other_side.lookup(kad_id)];
 		}
 		return ret_side;
 	}
-	insert(kad_id, value) {
-		const side = this.#side(kad_id);
-		return side.insert(kad_id, value);
+	insert(peer_connection) {
+		const side = this.#side(peer_connection.other_id.kad_id);
+		return side.insert(peer_connection);
 	}
-	remove(kad_id) {
-		const side = this.#side(kad_id);
-		side.remove(kad_id);
+	remove(peer_connection) {
+		const side = this.#side(peer_connection.other_id.kad_id);
+		side.remove(peer_connection);
 	}
 }
 class KBucketLeaf {
-	inner = [];
+	inner = new Set();
 	parent = null;
 	bit;
 	// Our bit space is 256, so we mask the msb with 1n << 256n
@@ -127,14 +155,17 @@ class KBucketLeaf {
 			return true; // If we're the top node, then we deffinitely include our_peerid
 		}
 	}
+	could_insert(_kad_id) {
+		return this.inner.size < k;
+	}
 	lookup(_kad_id) {
 		// Clone our inner array
 		return Array.from(this.inner);
 	}
-	insert(kad_id, value) {
-		if (this.inner.length < k) {
-			this.inner.push({kad_id, value});
-			return this;
+	insert(peer_connection) {
+		if (!this.inner.has(peer_connection) && this.inner.size < k) {
+			this.inner.add(peer_connection);
+			return true;
 		} else if (this.#can_split()) {
 			// Split
 			const new_internal = new KBucketInternal(this.bit, this.parent);
@@ -148,36 +179,30 @@ class KBucketLeaf {
 				this.parent.root = new_internal;
 			}
 			// Insert our existing items into the new buckets
-			for (const {kad_id, item} of this.inner) {
-				new_internal.insert(kad_id, item);
+			for (const connection of this.inner) {
+				new_internal.insert(connection);
 			}
 			// Insert the new item that we were asked to insert
-			new_internal.insert(kad_id, value);
-		} else {
-			value.release();
-			return undefined;
+			return new_internal.insert(peer_connection);
 		}
+		return false;
 	}
-	remove(kad_id) {
-		this.inner = this.inner.filter(({kad_id: i, value}) => {
-			if (i == kad_id) {
-				value.release();
-				return false;
-			} else {
-				return true;
-			}
-		});
-		if (this.inner.length == 0 && this.parent instanceof KBucketInternal) {
-			// Remove this K-Bucket and replace its parent with the other side of the internal node
-			const other_side = (this.parent.left == this) ? this.parent.right : this.parent.left;
-			other_side.bit += this.parent.bit;
-			// Update our parent's parent
-			if (this.parent.parent.left == this.parent) {
-				this.parent.parent.left = other_side;
-			} else if (this.parent.parent.right == this.parent) {
-				this.parent.parent.right = other_side;
-			} else if (this.parent.parent.root == this.parent) {
-				this.parent.parent.root = other_side;
+	remove(peer_connection) {
+		if (this.inner.has(peer_connection)) {
+			this.inner.delete(peer_connection);
+			if (this.inner.size == 0 && this.parent instanceof KBucketInternal) {
+				// Remove this K-Bucket and replace its parent with the other side of the internal node
+				const other_side = (this.parent.left == this) ? this.parent.right : this.parent.left;
+				other_side.bit += this.parent.bit;
+				other_side.parent = this.parent.parent;
+				// Update our parent's parent
+				if (this.parent.parent.left == this.parent) {
+					this.parent.parent.left = other_side;
+				} else if (this.parent.parent.right == this.parent) {
+					this.parent.parent.right = other_side;
+				} else if (this.parent.parent.root == this.parent) {
+					this.parent.parent.root = other_side;
+				}
 			}
 		}
 	}
@@ -186,42 +211,14 @@ export const routing_table = new RoutingTable();
 
 // Insert / Remove PeerConnections into our k_buckets
 PeerConnection.events.addEventListener('connected', ({ detail: new_connection }) => {
-	routing_table.insert(new_connection.other_id.kad_id, new_connection);
-	console.log("added", routing_table);
-	draw_buckets();
+	if (!routing_table.insert(new_connection)) {
+		console.log("didn't insert new connection", new_connection);
+		setTimeout(() => new_connection.abandon(), 5000);
+	}
 });
 PeerConnection.events.addEventListener('disconnected', ({ detail: old_connection }) => {
-	if (old_connection.other_id) {
-		routing_table.remove(old_connection.other_id.kad_id);
-		console.log("removed", routing_table);
-		draw_buckets();
-	}
+	routing_table.remove(old_connection);
 });
-
-const draw_container = document.createElement('div');
-draw_container.classList.add('buckets');
-document.body.appendChild(draw_container);
-function draw_buckets(el = draw_container, node = routing_table) {
-	if (node instanceof RoutingTable) {
-		el.innerHTML = `<code style="color: red;">${our_peerid.kad_id.toString(2).padStart(256, '0')}</code><br>`;
-		el.innerHTML += node.sibling_list.map(({kad_id}) => `<code>${kad_id.toString(2).padStart(256, '0')}</code><br>`).join('');
-		const new_el = document.createElement('div');
-		el.appendChild(new_el);
-		draw_buckets(new_el, node.root);
-	} else if (node instanceof KBucketInternal) {
-		el.classList.add('internal');
-		const left = document.createElement('div');
-		left.classList.add('left');
-		const right = document.createElement('div');
-		right.classList.add('right');
-		el.appendChild(left);
-		el.appendChild(right);
-		draw_buckets(left, node.left);
-		draw_buckets(right, node.right);
-	} else if (node instanceof KBucketLeaf) {
-		el.innerHTML = node.inner.map(({ kad_id }) => `<code>${kad_id.toString(2).padStart(256, '0')}</code><br>`).join('');
-	}
-}
 
 export function get_routing_table() {
 	// This time around, I'm trying to have the routing table be a snapshot of the current connections.  In the future when more complex routing is needed it can't be that way (we may need to store routing paths not just datachannels) but we'll cross that bridge when we come to it.
@@ -230,7 +227,7 @@ export function get_routing_table() {
 	for (const pc of PeerConnection.connections) {
 		if (pc.other_id) {
 			const dc = pc.get_hn_dc();
-			if (dc) routing_table.set(pc.other_id, dc);
+			if (dc?.readyState == 'open') routing_table.set(pc.other_id, dc);
 		}
 	}
 	return routing_table;
@@ -246,58 +243,28 @@ export function get_peer_id_set() {
 	return peer_set;
 }
 
-export async function source_route(path, data) {
-	const routing_table = get_routing_table();
-	for (let i = path.length - 1; i >= 0; --i) {
-		const peer_id = path[i];
-		if (peer_id == our_peerid) {
-			// If we reach our own public_key then abort so that we don't route the message backwards.
-			break;
-		} else if (routing_table.has(peer_id)) {
-			const route = routing_table.get(peer_id);
-			try {
-				if (typeof msgOrData !== 'string' && i < path.length - 1) {
-					msgOrData = {
-						type: 'source_route',
-						path: path.slice(i).map(pid => pid.public_key_encoded),
-						content: msgOrData
-					};
-				}
-				if (typeof msgOrData !== 'string') {
-					console.log("Send", msgOrData);
-					msgOrData = await sign_message(msgOrData);
-				}
-				route.send(msgOrData);
-				return;
-			} catch (e) { console.error(e); }
+export async function source_route(path, body) {
+	// Sorry about the naming... Things have changed around quite a few times, but the peer_table is a table of all the peers that we have direct webrtc connections to, that also has an open rtcdatachannel.
+	const peer_table = get_routing_table();
+	for (const pid of path) {
+		const connection = peer_table.get(pid);
+		if (connection) {
+			console.log('Snd:', body, connection.other_id);
+			body = JSON.stringify(body);
+			const body_sig = await our_peerid.sign(body);
+			// TODO: only include the forward path if we aren't sending directly to the intended target
+			const forward_path = path.map(pid => pid.public_key_encoded).join(',');
+			const forward_sig = await our_peerid.sign(forward_path);
+			const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
+			const back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`];
+			connection.send(JSON.stringify({
+				origin: our_peerid.public_key_encoded,
+				forward_path, forward_sig,
+				body, body_sig,
+				back_path
+			}));
+			return;
 		}
 	}
 	throw new Error('Destination Unreachable');
 }
-export function kad_route(kad_id, data, ignore_self_distance = false) {
-	const closest = routing_table.lookup(kad_id, ignore_self_distance);
-	if (closest.length > 0) {
-		const peer_connection = closest[0].value;
-		peer_connection.send(data);
-	} else {
-		throw new Error('Destination Unreachable');
-	}
-}
-
-// Source route a msg based on a path
-export async function route(destination, msgOrData, ignore_self_distance = false) {
-	const candidates = routing_table.lookup(destination, ignore_self_distance);
-	if (candidates.length > 0) {
-		console.log("send", msgOrData);
-		const {value: closest} = candidates[0];
-		// The candidates are sorted so that the closest to the destination is first:
-		if (typeof msgOrData !== 'string') {
-			msgOrData = await sign_message(msgOrData);
-		}
-		closest.send(msgOrData);
-		return;
-	}
-	throw new Error("Path Unreachable");
-}
-
-// The finite routing table space needs to be shared between DHT, GossipSub, etc.  While a connection might be quite important from a DHT distance perspective, it might not be useful with respect ot the topics we're subscribed to, or it might not have any of the same distributed applications running on it that we are running.

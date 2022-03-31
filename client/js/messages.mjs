@@ -1,22 +1,40 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { get_peer_id_set, get_routing_table, route, routing_table } from "./routing-table.mjs";
+import { get_routing_table, routing_table, source_route } from "./routing-table.mjs";
 import { PeerConnection } from "./webrtc.mjs";
+import { kad_dst } from "./kad.mjs";
 
 function create_nonce() {
     return Array.from(crypto.getRandomValues(new Uint8Array(4))).map(v => v.toString(16).padStart(2, '0')).join('');
 }
 
+export const sniffed_map = new Map();
+
 export async function verify_message(data) {
 	let {
-		origin,
 		forward_path, forward_sig,
 		body, body_sig,
 		back_path
 	} = JSON.parse(data);
 
-	// Import the sender's peer_id
-	if (!(typeof origin == 'string')) throw new Error("Data missing origin");
-	origin = await PeerId.from_encoded(origin);
+	// Verify the back_path
+	if (!Array.isArray(back_path)) throw new Error('missing back_path');
+	let last_pid = our_peerid;
+	const back_path_parsed = [];
+	if (back_path.length < 1) throw new Error("back path can't be empty.");
+	for (const hop of back_path) {
+		if (typeof hop != 'string') throw new Error('non-string in back_path');
+		let [peer_id, signature] = hop.split('.');
+		peer_id = await PeerId.from_encoded(peer_id ?? '');
+		if (!await peer_id.verify(signature ?? '', last_pid.public_key_encoded + body_sig ?? '')) throw new Error('signature failed in back_path.');
+		back_path_parsed.unshift(peer_id);
+
+		// Testing: Create a map of how the network is connected:
+		if (!sniffed_map.has(peer_id)) sniffed_map.set(peer_id, new Set());
+		sniffed_map.get(peer_id).add(last_pid);
+
+		last_pid = peer_id;
+	}
+	const origin = back_path_parsed[0];
 
 	// Verify the forward_path:
 	let forward_path_parsed;
@@ -38,20 +56,6 @@ export async function verify_message(data) {
 		body = undefined;
 	}
 
-	// Verify the back_path
-	if (!Array.isArray(back_path)) throw new Error('missing back_path');
-	let last_pid = our_peerid;
-	const back_path_parsed = [];
-	for (const hop of back_path) {
-		if (typeof hop != 'string') throw new Error('non-string in back_path');
-		let [peer_id, signature] = hop.split('.');
-		peer_id = await PeerId.from_encoded(peer_id ?? '');
-		if (!await peer_id.verify(signature ?? '', last_pid.public_key_encoded + body_sig ?? '')) throw new Error('signature failed in back_path.');
-		back_path_parsed.unshift(peer_id);
-		last_pid = peer_id;
-	}
-	back_path_parsed.reverse();
-
 	return {
 		origin,
 		forward_path_parsed,
@@ -62,22 +66,25 @@ export async function verify_message(data) {
 
 // Trigger a lookup_node
 export async function lookup_node(peer_id) {
+	if (typeof peer_id == 'string') {
+		peer_id = await PeerId.from_encoded(peer_id);
+	}
 	const candidates = routing_table.lookup(peer_id.kad_id, true);
 	if (candidates.length > 0) {
-		const {value: closest} = candidates[0];
-		const body = JSON.stringify({
+		const closest = candidates[0];
+		let body = {
 			type: 'lookup_node',
 			nonce: create_nonce(),
 			node: peer_id.public_key_encoded
-		});
+		};
+		console.log('Snd:', body, closest.other_id);
+		body = JSON.stringify(body);
 		const body_sig = await our_peerid.sign(body);
 		const back_path_sig = await our_peerid.sign(closest.other_id.public_key_encoded + body_sig);
 		closest.send(JSON.stringify({
-			origin: our_peerid.public_key_encoded,
 			body, body_sig,
 			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`]
 		}));
-		console.log('Snd:', body, closest.other_id);
 		return;
 	}
 	throw new Error("Destination Unreachable");
@@ -88,107 +95,82 @@ export async function message_handler({ data }) {
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
-		const {origin, forward_path, forward_sig, body, body_sig, back_path} = JSON.parse(data);
+		const {forward_path, forward_sig, body, body_sig, back_path} = JSON.parse(data);
 		const routing_table = get_routing_table();
-		for (const peer_id of forward_path) {
+		for (const peer_id of forward_path_parsed) {
 			if (peer_id == our_peerid) break;
 			const peer_connection = routing_table.get(peer_id);
 			if (peer_connection) {
 				const back_path_sig = await our_peerid.sign(peer_id.public_key_encoded + body_sig);
 				peer_connection.send(JSON.stringify({
-					origin, forward_path, forward_sig, body, body_sig,
+					forward_path, forward_sig, body, body_sig,
 					back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
 				}));
-				console.log('Fwd:', body, origin);
+				console.log('Fwd:', body);
 				return;
 			}
 		}
 		throw new Error("Destination Unreachable");
 	}
 
-	// Create our reply function:
-	async function reply(body) {
-		// Create a forward path from the parsed back path:
-		const forward_path = back_path_parsed.map(pid => pid.public_key_encoded).join(',');
-		const forward_sig = await our_peerid.sign(forward_path);
-		if (typeof body != 'string') {
-			body = JSON.stringify(body);
-		}
-		const body_sig = await our_peerid.sign(body);
-		const routing_table = get_routing_table();
-		// Route the message to the first peer in the back_path that we have a direct connection to.
-		for (const peer_id of back_path_parsed) {
-			const peer_connection = routing_table.get(peer_id);
-			if (peer_connection) {
-				const back_path_sig = await our_peerid.sign(peer_id.public_key_encoded + body_sig);
-				peer_connection.send(JSON.stringify({
-					origin: our_peerid.public_key_encoded,
-					forward_path, forward_sig,
-					body, body_sig,
-					back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`]
-				}));
-				console.log('Rep:', body);
-				return;
-			}
-		}
-		throw new Error("Destination Unreachable");
-	}
-
-	console.log('Rec:', body, origin);
+	console.log('Rec:', body);
 
 	// Handle the message:
 	if (body.type == 'lookup_node') {
 		if (origin == our_peerid) return;
 		const node = await PeerId.from_encoded(body.node);
-		const closer = routing_table.lookup(node.kad_id).map(({value}) => value);
-		await reply({
+		let closer = routing_table.lookup(node.kad_id);
+		await source_route(back_path_parsed, {
 			type: 'lookup_ack',
 			nonce: body.nonce,
 			closer: closer.map(conn => conn.other_id.public_key_encoded)
 		});
+		// Only consider routing the lookup to peers that are closer than our own peer_id, and also not the original sender
+		const our_dst = kad_dst(our_peerid.kad_id, node.kad_id);
+		closer = closer.filter(con => con.other_id != origin && kad_dst(con.other_id.kad_id, node.kad_id) < our_dst);
+
+		// If there's still a closer peer, that we have a connection to, then route the lookup to that peer
 		if (closer.length > 0) {
 			// Route the lookup to the closest node:
-			const {origin, body, body_sig, back_path} = JSON.parse(data);
+			const {body, body_sig, back_path} = JSON.parse(data);
 			const back_path_sig = await our_peerid.sign(closer[0].other_id.public_key_encoded + body_sig);
 			closer[0].send(JSON.stringify({
-				origin, body, body_sig,
+				body, body_sig,
 				back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
 			}));
 		}
+
+		// TODO: Sniff the back path for any peers we'd like to connect to?
 	} else if (body.type == 'lookup_value') {
 		// TODO: check our stored values
 	} else if (body.type == 'lookup_ack') {
 		const peers = await Promise.all(body.closer.map(encoded => PeerId.from_encoded(encoded)));
-		const peer_id_set = get_peer_id_set();
 		for (const peer of peers) {
-			if (peer != our_peerid && !peer_id_set.has(peer) && routing_table.should_add(peer.kad_id)) {
-				// Create a peerconnection for this peer:
-				const pc = new PeerConnection();
-				pc.other_id = peer;
-				const offer = pc.negotiate();
-				await reply({
-					type: 'connect',
-					nonce: create_nonce(),
-					sdp: offer
-				});
-				peer_id_set.add(peer);
+			if (peer != our_peerid && routing_table.could_insert(peer.kad_id)) {
+				// Try to negotiate the peerconnection:
+				const sdp = await PeerConnection.handle_connect(peer);
+				if (sdp) {
+					await source_route([peer, ...back_path_parsed], {
+						type: 'connect',
+						nonce: create_nonce(),
+						sdp
+					});
+				}
 			}
 		}
 	} else if (body.type == 'connect') {
-		const ret_description = await PeerConnection.handle_connect(origin, body.sdp);
-		if (ret_description) {
-			await reply({
+		const sdp = await PeerConnection.handle_connect(origin, body.sdp);
+		if (sdp) {
+			await source_route(back_path_parsed, {
 				type: 'connect',
 				nonce: body.nonce,
-				sdp: ret_description
+				sdp
 			});
 		}
 	}
 }
 
 const message_format = {
-	// Encoded public key of the original sender:
-	origin: "",
 	/**
 	 * The forward path is the intended path that this message will take.
 	 * The forward path is reversed (the target is the first item, the second to last hop is the second, etc.).
