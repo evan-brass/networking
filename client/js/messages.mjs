@@ -8,6 +8,9 @@ function create_nonce() {
 }
 
 export const sniffed_map = new Map();
+setInterval(() => {
+	sniffed_map.clear();
+}, 10000);
 
 export async function verify_message(data) {
 	let {
@@ -90,8 +93,28 @@ export async function lookup_node(peer_id) {
 	throw new Error("Destination Unreachable");
 }
 
+async function sniff_backpath(back_path_parsed) {
+	for (let i = 0; i < back_path_parsed.length; ++i) {
+		const pid = back_path_parsed[i];
+		if (pid != our_peerid && routing_table.could_insert(pid.kad_id)) {
+			// Try to create a peerconnection to this peer:
+			const sdp = await PeerConnection.handle_connect(pid);
+			if (sdp) {
+				await source_route(back_path_parsed.slice(i), {
+					type: 'connect',
+					nonce: create_nonce(),
+					sdp
+				});
+			}
+		}
+	}
+}
+
 export async function message_handler({ data }) {
 	const {origin, forward_path_parsed, body, back_path_parsed} = await verify_message(data);
+
+	// Sniff Back path and consider connecting to the peers in it:
+	sniff_backpath(back_path_parsed);
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
@@ -146,17 +169,7 @@ export async function message_handler({ data }) {
 	} else if (body.type == 'lookup_ack') {
 		const peers = await Promise.all(body.closer.map(encoded => PeerId.from_encoded(encoded)));
 		for (const peer of peers) {
-			if (peer != our_peerid && routing_table.could_insert(peer.kad_id)) {
-				// Try to negotiate the peerconnection:
-				const sdp = await PeerConnection.handle_connect(peer);
-				if (sdp) {
-					await source_route([peer, ...back_path_parsed], {
-						type: 'connect',
-						nonce: create_nonce(),
-						sdp
-					});
-				}
-			}
+			sniff_backpath([peer, ...back_path_parsed]);
 		}
 	} else if (body.type == 'connect') {
 		const sdp = await PeerConnection.handle_connect(origin, body.sdp);

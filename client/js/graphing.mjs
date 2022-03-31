@@ -21,11 +21,27 @@ function position_pid(pid) {
 }
 function draw_peers(iter, color = 'black') {
     for (const pid of iter) {
+        let peer_conn;
+        for (const conn of PeerConnection.connections) {
+            if (conn.other_id == pid) {
+                peer_conn = conn;
+                break;
+            }
+        }
+        let is_sibling = false;
+        for (const sib of routing_table.sibling_list) {
+            if (sib.other_id == pid) {
+                is_sibling = true;
+                break;
+            }
+        }
         if (pid == our_peerid) {
             ctx.fillStyle = 'red';
-        } else if (routing_table.sibling_list.find(c => c.other_id == pid)) {
+        } else if (is_sibling) {
             ctx.fillStyle = 'orange'
-        } else if (Array.from(PeerConnection.connections).find(c => c.other_id == pid)) {
+        } else if (peer_conn && peer_conn.get_hn_dc()?.readyState == 'open') {
+            ctx.fillStyle = 'green';
+        } else if (peer_conn) {
             ctx.fillStyle = 'blue';
         } else {
             ctx.fillStyle = color;
@@ -64,6 +80,6 @@ function draw_network() {
         }
     }
 
-    setTimeout(draw_network, 1000);
+    requestAnimationFrame(draw_network);
 }
 draw_network();

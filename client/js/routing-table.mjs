@@ -5,25 +5,32 @@ import { kad_dst } from "./kad.mjs";
 // There are existing k-bucket implementations out there but I don't think they use bigint.
 
 // k is the max number of items that can be held inside a KBucketLeaf
-const k = 2;
+const k = 1;
 // Maximum number of values to return from the routing table:
 const num_ret = 5;
 // We maintain at least the _ closest peers (even if they don't fit exactly in the same bucket as our peer_id)
-const sibling_list_size = 3;
+const sibling_list_size = 2;
 // TODO: Sort the returned items by their distance to the kad_id being looked up.
 // The Routing table stores kad_id -> PeerConnections
 // We'll need a separate table to store kad_id -> values if we want DHT functionality
+function linear_dist(a, b) {
+	if (typeof a != 'bigint' || typeof b != 'bigint') throw new Error('Must be bigints');
+	let ret = a - b;
+	if (ret < 0n) ret *= -1n;
+	return ret;
+}
 class RoutingTable {
 	root = new KBucketLeaf(255n, this);
 	sibling_list = [];
 	could_insert(kad_id) {
+		// TODO: check to make sure that we don't already have kad_id in the routing table?
 		if (this.sibling_list < sibling_list_size) return true;
 		if (this.sibling_list_size > 0) {
 			// Check if this could displace a sibling:
-			const new_dist = kad_dst(our_peerid.kad_id, kad_id);
-			const dist_head = kad_dst(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
+			const new_dist = linear_dist(our_peerid.kad_id, kad_id);
+			const dist_head = linear_dist(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
 			if (new_dist < dist_head) return true;
-			const dist_tail = kad_dst(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
+			const dist_tail = linear_dist(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
 			if (new_dist < dist_tail) return true;
 		}
 		return this.root.could_insert(kad_id);
@@ -52,9 +59,9 @@ class RoutingTable {
 			this.sibling_list.sort((con_a, con_b) => (con_a.other_id.kad_id < con_b.other_id.kad_id) ? -1 : 1);
 			return true;
 		} else if (sibling_list_size > 0) {
-			const new_dist = kad_dst(our_peerid.kad_id, peer_connection.other_id.kad_id);
-			const dist_head = kad_dst(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
-			const dist_tail = kad_dst(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
+			const new_dist = linear_dist(our_peerid.kad_id, peer_connection.other_id.kad_id);
+			const dist_head = linear_dist(our_peerid.kad_id, this.sibling_list[0].other_id.kad_id);
+			const dist_tail = linear_dist(our_peerid.kad_id, this.sibling_list[this.sibling_list.length - 1].other_id.kad_id);
 			let displaced;
 			if (new_dist < dist_head) {
 				displaced = this.sibling_list.shift();

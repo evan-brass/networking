@@ -128,6 +128,9 @@ export class PeerConnection extends RTCPeerConnection {
 		if (this.signalingState == 'closed') return;
 
 		if (type === undefined) {
+			// Skip trying to create an offer if we're already connected to this peer.
+			if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') return;
+			
 			// Negotiate will be called without a description when we are initiating a connection to another peer, or when we are generating offers for webtorrent trackers.
 			this.#making_offer = true;
 
