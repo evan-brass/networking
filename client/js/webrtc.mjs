@@ -2,6 +2,7 @@ import { message_handler } from "./messages.mjs";
 import { iceServers } from "./network-props.mjs";
 import { privateKey, PeerId, our_peerid } from "./peer-id.mjs";
 import { base64_decode, base64_encode, P256 } from "./lib.mjs";
+import { routing_table } from "./routing-table.mjs";
 
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
@@ -34,6 +35,8 @@ export class PeerConnection extends RTCPeerConnection {
 	#hn_dc = null;
 	#connecting_timeout = false;
 	#making_offer = false;
+	#claimed = 0;
+	#claimed_timeout = false;
 	constructor() {
 		super({
 			bundlePolicy: "max-bundle", // Bundling is supported by browsers, just not voip-phones and such.
@@ -48,10 +51,15 @@ export class PeerConnection extends RTCPeerConnection {
 			id: 42
 		});
 		this.#hn_dc.onopen = () => {
+			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
+			routing_table.insert(this);
 			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: this }));
 		};
 		this.#hn_dc.onclose = () => {
-			PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: this }));
+			if (this.other_id) {
+				routing_table.delete(this);
+				PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: this }));
+			}
 		};
 		this.#hn_dc.onmessage = message_handler;
 
@@ -62,6 +70,23 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
 
 		PeerConnection.connections.add(this);
+	}
+	#claimed_timeout_func() {
+		if (this.#claimed == 0) {
+			this.abandon();
+		}
+		this.#claimed_timeout = false;
+	}
+	claim() {
+		this.#claimed += 1;
+		if (this.#claimed_timeout) clearTimeout(this.#claimed_timeout);
+		this.#claimed_timeout = false;
+	}
+	release() {
+		this.#claimed -= 1;
+		if (this.#claimed == 0 && this.#claimed_timeout == false) {
+			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
+		}
 	}
 	send(data) {
 		if (this.#hn_dc?.readyState == 'open') {
@@ -87,18 +112,7 @@ export class PeerConnection extends RTCPeerConnection {
 		} else if (this.iceConnectionState == 'checking') {
 			// Set a timeout so that we don't get a peer connection that lives in connecting forever.
 			this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
-		} else if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') {
-			// Set a timeout so that if this peer connection doesn't get picked up by our routing tables, it gets closed eventually.
-			// The timeout here is a little longer so that if a peer connects to us and tries to bootstrap, it has a little bit of time to do so.
-			// if (this.#claimed_timeout == false) {
-			// 	this.#claimed_timeout = setTimeout(() => {
-			// 		if (this.#claimed <= 0) {
-			// 			this.abandon();
-			// 		}
-			// 		this.#claimed_timeout = false;
-			// 	}, 10000);
-			// }
-		} if (this.iceConnectionState == 'closed') {
+		} else if (this.iceConnectionState == 'closed') {
 			// Cleanup as much as we can:
 			PeerConnection.connections.delete(this);
 			this.ondatachannel = undefined;

@@ -1,7 +1,5 @@
-import { sniffed_map } from "./messages.mjs";
-import { our_peerid, PeerId } from "./peer-id.mjs";
+import { PeerId, our_peerid } from "./peer-id.mjs";
 import { routing_table } from "./routing-table.mjs";
-import { PeerConnection } from "./webrtc.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -19,40 +17,6 @@ function position_pid(pid) {
     const y = 1000 + Math.sin(rad) * 900;
     return {x, y};
 }
-function draw_peers(iter, color = 'black') {
-    for (const pid of iter) {
-        let peer_conn;
-        for (const conn of PeerConnection.connections) {
-            if (conn.other_id == pid) {
-                peer_conn = conn;
-                break;
-            }
-        }
-        let is_sibling = false;
-        for (const sib of routing_table.sibling_list) {
-            if (sib.other_id == pid) {
-                is_sibling = true;
-                break;
-            }
-        }
-        if (pid == our_peerid) {
-            ctx.fillStyle = 'red';
-        } else if (is_sibling) {
-            ctx.fillStyle = 'orange'
-        } else if (peer_conn && peer_conn.get_hn_dc()?.readyState == 'open') {
-            ctx.fillStyle = 'green';
-        } else if (peer_conn) {
-            ctx.fillStyle = 'blue';
-        } else {
-            ctx.fillStyle = color;
-        }
-        const {x, y} = position_pid(pid);
-        ctx.beginPath();
-        ctx.arc(x, y, node_radius, 0, 2 * Math.PI);
-        ctx.closePath();
-        ctx.fill();
-    }
-}
 function draw_network() {
 
     ctx.clearRect(0, 0, canvas_size, canvas_size);
@@ -64,21 +28,38 @@ function draw_network() {
     ctx.stroke();
 
     // Draw out all of the peer_ids that we've ever seen
-    draw_peers(PeerId.peer_ids.values());
+    for (const pid of PeerId.peer_ids.values()) {
+        const {value: conn, done: is_exact} = routing_table.lookup(pid.kad_id).next();
+        const is_sibling = routing_table.is_sibling(pid.kad_id);
+        if (pid == our_peerid) {
+            ctx.fillStyle = 'red';
+        } else if (is_sibling) {
+            ctx.fillStyle = 'orange';
+        } else if (is_exact && conn) {
+            ctx.fillStyle = 'blue';
+        } else {
+            ctx.fillStyle = 'black';
+        }
+        const {x, y} = position_pid(pid);
+        ctx.beginPath();
+        ctx.arc(x, y, node_radius, 0, 2 * Math.PI);
+        ctx.closePath();
+        ctx.fill();
+    }
 
     // Draw the sniffed connections
-    ctx.fillStyle = 'purple';
-    for (const [pid, conns] of sniffed_map.entries()) {
-        for (const conn of conns) {
-            // Draw an arc from pid -> conn
-            const {x: x1, y: y1} = position_pid(pid);
-            const {x: x2, y: y2} = position_pid(conn);
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.bezierCurveTo(1000, 1000, 1000, 1000, x2, y2);
-            ctx.stroke();
-        }
-    }
+    // ctx.fillStyle = 'purple';
+    // for (const [pid, conns] of sniffed_map.entries()) {
+    //     for (const conn of conns) {
+    //         // Draw an arc from pid -> conn
+    //         const {x: x1, y: y1} = position_pid(pid);
+    //         const {x: x2, y: y2} = position_pid(conn);
+    //         ctx.beginPath();
+    //         ctx.moveTo(x1, y1);
+    //         ctx.bezierCurveTo(1000, 1000, 1000, 1000, x2, y2);
+    //         ctx.stroke();
+    //     }
+    // }
 
     requestAnimationFrame(draw_network);
 }

@@ -1,16 +1,10 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { get_routing_table, routing_table, source_route } from "./routing-table.mjs";
-import { PeerConnection } from "./webrtc.mjs";
-import { kad_dst } from "./kad.mjs";
+import { routing_table } from "./routing-table.mjs";
+import { PeerConnection } from './webrtc.mjs';
 
 function create_nonce() {
     return Array.from(crypto.getRandomValues(new Uint8Array(4))).map(v => v.toString(16).padStart(2, '0')).join('');
 }
-
-export const sniffed_map = new Map();
-setInterval(() => {
-	sniffed_map.clear();
-}, 10000);
 
 export async function verify_message(data) {
 	let {
@@ -32,8 +26,8 @@ export async function verify_message(data) {
 		back_path_parsed.unshift(peer_id);
 
 		// Testing: Create a map of how the network is connected:
-		if (!sniffed_map.has(peer_id)) sniffed_map.set(peer_id, new Set());
-		sniffed_map.get(peer_id).add(last_pid);
+		// if (!sniffed_map.has(peer_id)) sniffed_map.set(peer_id, new Set());
+		// sniffed_map.get(peer_id).add(last_pid);
 
 		last_pid = peer_id;
 	}
@@ -68,35 +62,24 @@ export async function verify_message(data) {
 }
 
 // Trigger a lookup_node
-export async function lookup_node(peer_id) {
-	if (typeof peer_id == 'string') {
-		peer_id = await PeerId.from_encoded(peer_id);
-	}
-	const candidates = routing_table.lookup(peer_id.kad_id, true);
-	if (candidates.length > 0) {
-		const closest = candidates[0];
-		let body = {
-			type: 'lookup_node',
-			nonce: create_nonce(),
-			node: peer_id.public_key_encoded
-		};
-		console.log('Snd:', body, closest.other_id);
-		body = JSON.stringify(body);
-		const body_sig = await our_peerid.sign(body);
-		const back_path_sig = await our_peerid.sign(closest.other_id.public_key_encoded + body_sig);
-		closest.send(JSON.stringify({
-			body, body_sig,
-			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`]
-		}));
-		return;
-	}
-	throw new Error("Destination Unreachable");
+export async function lookup_node(kad_id) {
+	await routing_table.kad_route(kad_id, {
+		type: 'lookup_node',
+		nonce: create_nonce(),
+		kad_id
+	});
+}
+export async function announce_self() {
+	await routing_table.sibling_broadcast({
+		type: "we're siblings",
+		nonce: create_nonce()
+	});
 }
 
 async function sniff_backpath(back_path_parsed) {
 	for (let i = 0; i < back_path_parsed.length; ++i) {
 		const pid = back_path_parsed[i];
-		if (pid != our_peerid && routing_table.could_insert(pid.kad_id)) {
+		if (pid != our_peerid && routing_table.space_available(pid.kad_id)) {
 			// Try to create a peerconnection to this peer:
 			const sdp = await PeerConnection.handle_connect(pid);
 			if (sdp) {
@@ -118,69 +101,54 @@ export async function message_handler({ data }) {
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
-		const {forward_path, forward_sig, body, body_sig, back_path} = JSON.parse(data);
-		const routing_table = get_routing_table();
-		for (const peer_id of forward_path_parsed) {
-			if (peer_id == our_peerid) break;
-			const peer_connection = routing_table.get(peer_id);
-			if (peer_connection) {
-				const back_path_sig = await our_peerid.sign(peer_id.public_key_encoded + body_sig);
-				peer_connection.send(JSON.stringify({
-					forward_path, forward_sig, body, body_sig,
-					back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
-				}));
-				console.log('Fwd:', body);
-				return;
-			}
-		}
-		throw new Error("Destination Unreachable");
+		await routing_table.forward(forward_path_parsed, data);
 	}
 
 	console.log('Rec:', body);
 
 	// Handle the message:
-	if (body.type == 'lookup_node') {
-		if (origin == our_peerid) return;
-		const node = await PeerId.from_encoded(body.node);
-		let closer = routing_table.lookup(node.kad_id);
-		await source_route(back_path_parsed, {
-			type: 'lookup_ack',
-			nonce: body.nonce,
-			closer: closer.map(conn => conn.other_id.public_key_encoded)
-		});
-		// Only consider routing the lookup to peers that are closer than our own peer_id, and also not the original sender
-		const our_dst = kad_dst(our_peerid.kad_id, node.kad_id);
-		closer = closer.filter(con => con.other_id != origin && kad_dst(con.other_id.kad_id, node.kad_id) < our_dst);
+	// if (body.type == 'lookup_node') {
+	// 	if (origin == our_peerid) return;
+	// 	const node = await PeerId.from_encoded(body.node);
+	// 	let closer = routing_table.lookup(node.kad_id);
+	// 	await source_route(back_path_parsed, {
+	// 		type: 'lookup_ack',
+	// 		nonce: body.nonce,
+	// 		closer: closer.map(conn => conn.other_id.public_key_encoded)
+	// 	});
+	// 	// Only consider routing the lookup to peers that are closer than our own peer_id, and also not the original sender
+	// 	const our_dst = kad_dst(our_peerid.kad_id, node.kad_id);
+	// 	closer = closer.filter(con => con.other_id != origin && kad_dst(con.other_id.kad_id, node.kad_id) < our_dst);
 
-		// If there's still a closer peer, that we have a connection to, then route the lookup to that peer
-		if (closer.length > 0) {
-			// Route the lookup to the closest node:
-			const {body, body_sig, back_path} = JSON.parse(data);
-			const back_path_sig = await our_peerid.sign(closer[0].other_id.public_key_encoded + body_sig);
-			closer[0].send(JSON.stringify({
-				body, body_sig,
-				back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
-			}));
-		}
+	// 	// If there's still a closer peer, that we have a connection to, then route the lookup to that peer
+	// 	if (closer.length > 0) {
+	// 		// Route the lookup to the closest node:
+	// 		const {body, body_sig, back_path} = JSON.parse(data);
+	// 		const back_path_sig = await our_peerid.sign(closer[0].other_id.public_key_encoded + body_sig);
+	// 		closer[0].send(JSON.stringify({
+	// 			body, body_sig,
+	// 			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
+	// 		}));
+	// 	}
 
-		// TODO: Sniff the back path for any peers we'd like to connect to?
-	} else if (body.type == 'lookup_value') {
-		// TODO: check our stored values
-	} else if (body.type == 'lookup_ack') {
-		const peers = await Promise.all(body.closer.map(encoded => PeerId.from_encoded(encoded)));
-		for (const peer of peers) {
-			sniff_backpath([peer, ...back_path_parsed]);
-		}
-	} else if (body.type == 'connect') {
-		const sdp = await PeerConnection.handle_connect(origin, body.sdp);
-		if (sdp) {
-			await source_route(back_path_parsed, {
-				type: 'connect',
-				nonce: body.nonce,
-				sdp
-			});
-		}
-	}
+	// 	// TODO: Sniff the back path for any peers we'd like to connect to?
+	// } else if (body.type == 'lookup_value') {
+	// 	// TODO: check our stored values
+	// } else if (body.type == 'lookup_ack') {
+	// 	const peers = await Promise.all(body.closer.map(encoded => PeerId.from_encoded(encoded)));
+	// 	for (const peer of peers) {
+	// 		sniff_backpath([peer, ...back_path_parsed]);
+	// 	}
+	// } else if (body.type == 'connect') {
+	// 	const sdp = await PeerConnection.handle_connect(origin, body.sdp);
+	// 	if (sdp) {
+	// 		await source_route(back_path_parsed, {
+	// 			type: 'connect',
+	// 			nonce: body.nonce,
+	// 			sdp
+	// 		});
+	// 	}
+	// }
 }
 
 const message_format = {

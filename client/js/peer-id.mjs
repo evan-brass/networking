@@ -1,5 +1,4 @@
-import { make_kad_id } from "./kad.mjs";
-import { base64_decode, base64_encode, P256, text_decoder, text_encoder } from "./lib.mjs";
+import { base64_decode, base64_encode, P256, text_encoder, uint8array_to_bigint } from "./lib.mjs";
 
 /**
  * Peer IDs are ephemeral - they are created fresh each time.
@@ -66,7 +65,7 @@ export class PeerId {
 			y = y.replace(/-/g, '+').replace(/_/g, '/').padEnd(44, '=');
 			x = atob(x); y = atob(y);
 			const bytes = new Uint8Array((x + y).split('').map(e => e.charCodeAt(0)));
-			kad_id = await make_kad_id(bytes);
+			kad_id = uint8array_to_bigint(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 		}
 		return new PeerId({ public_key, public_key_encoded, kad_id });
 	}
