@@ -29,7 +29,9 @@ function draw_network() {
     ctx.stroke();
 
     // Draw out all of the peer_ids that we've ever seen
-    for (const pid of PeerId.peer_ids.values()) {
+    for (const wr of PeerId.peer_ids.values()) {
+        const pid = wr.deref();
+        if (pid == undefined) continue;
         const connection = routing_table.lookup(pid.kad_id, (a, b) => a == b);
         const is_sibling = routing_table.is_sibling(pid.kad_id);
         const bi = bucket_index(pid.kad_id);

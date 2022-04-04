@@ -45,11 +45,12 @@ export class PeerId {
 	}
 	static async from_encoded(public_key_encoded) {
 		let peer_id = PeerId.peer_ids.get(public_key_encoded);
+		if (peer_id) peer_id = peer_id.deref();
 		if (!peer_id) {
 			const pk_bytes = base64_decode(public_key_encoded);
 			const public_key = await crypto.subtle.importKey("raw", pk_bytes, P256, true, ["verify"]);
 			peer_id = await PeerId.from_public_key(public_key, public_key_encoded);
-			PeerId.peer_ids.set(public_key_encoded, peer_id);
+			PeerId.peer_ids.set(public_key_encoded, new WeakRef(peer_id));
 		}
 		return peer_id;
 	}
@@ -69,9 +70,14 @@ export class PeerId {
 		}
 		return new PeerId({ public_key, public_key_encoded, kad_id });
 	}
+	static cleanup_cache() {
+		for (const [encoded, pid] of PeerId.peer_ids.entries()) {
+			if (pid.deref() === undefined) PeerId.peer_ids.delete(encoded);
+		}
+	}
 }
 our_peerid = await PeerId.from_public_key(publicKey);
-PeerId.peer_ids.set(our_peerid.public_key_encoded, our_peerid);
+PeerId.peer_ids.set(our_peerid.public_key_encoded, new WeakRef(our_peerid));
 console.log("Our peer_id is", our_peerid);
 
 export { our_peerid, privateKey };
