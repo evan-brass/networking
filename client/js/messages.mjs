@@ -1,5 +1,5 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { lin_dst, routing_table } from "./routing-table.mjs";
+import { bucket_index, lin_dst, routing_table } from "./routing-table.mjs";
 import { PeerConnection } from './webrtc.mjs';
 
 function create_nonce() {
@@ -24,6 +24,8 @@ export async function verify_message(data) {
 		peer_id = await PeerId.from_encoded(peer_id ?? '');
 		if (!await peer_id.verify(signature ?? '', last_pid.public_key_encoded + body_sig ?? '')) throw new Error('signature failed in back_path.');
 		back_path_parsed.unshift(peer_id);
+
+		if (peer_id == our_peerid) throw new Error('Routing cycle detected in the back-path');
 
 		// Testing: Create a map of how the network is connected:
 		// if (!sniffed_map.has(peer_id)) sniffed_map.set(peer_id, new Set());
@@ -76,22 +78,15 @@ export async function announce_self() {
 		siblings: Array.from(routing_table.siblings()).map(c => c.other_id.public_key_encoded)
 	});
 }
-
-async function sniff_backpath(back_path_parsed) {
-	// for (let i = 0; i < back_path_parsed.length; ++i) {
-	// 	const pid = back_path_parsed[i];
-	// 	if (pid != our_peerid && routing_table.space_available(pid.kad_id)) {
-	// 		// Try to create a peerconnection to this peer:
-	// 		const sdp = await PeerConnection.handle_connect(pid);
-	// 		if (sdp) {
-	// 			await source_route(back_path_parsed.slice(i), {
-	// 				type: 'connect',
-	// 				nonce: create_nonce(),
-	// 				sdp
-	// 			});
-	// 		}
-	// 	}
-	// }
+function sibling_request_connect() {
+	return {
+		type: 'request_connect',
+		nonce: create_nonce(),
+		...routing_table.sibling_range()
+	};
+}
+function kbucket_request_connect(kbucket) {
+	// TODO: generate a random kad_id within the bucket and make a request_connect message with that destination.
 }
 
 routing_table.events.addEventListener('old-sibling', async () => {
@@ -103,9 +98,6 @@ routing_table.events.addEventListener('new-sibling', async () => {
 
 export async function message_handler({ data }) {
 	const {origin, forward_path_parsed, body, back_path_parsed} = await verify_message(data);
-
-	// Sniff Back path and consider connecting to the peers in it:
-	sniff_backpath(back_path_parsed);
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
@@ -145,32 +137,35 @@ export async function message_handler({ data }) {
 		}
 	} else if (body.type == 'not_siblings') {
 		const closer = await PeerId.from_encoded(body.closer);
-		await routing_table.source_route([closer, ...back_path_parsed], {
-			type: 'connect_request',
-			nonce: create_nonce()
-		});
+		await routing_table.source_route([closer, ...back_path_parsed], sibling_request_connect());
 	} else if (body.type == 'connect_request') {
-		if (body.bits) {
-			// TODO: handle kbucket connect_requests
-		} else {
-			// Handle a sibling connect request:
-			if (origin == our_peerid) return;
-			if (routing_table.space_available_sibling_list(origin.kad_id)) {
-				const sdp = await PeerConnection.handle_connect(origin, body.sdp);
-				// Accept the sibling_connect
-				if (sdp) {
-					await routing_table.source_route(back_path_parsed, {
-						type: 'connect',
-						nonce: body.nonce,
-						sdp
-					});
-				}
-			} else {
-				// Try to route the sibling_connect onward
-				const {body, body_sig, back_path} = JSON.parse(data);
-				await routing_table.kad_route_data(origin.kad_id, {body, body_sig, back_path}, (a, b) => a !== b);
-				// TODO: reply with a routing acknowledgement?
+		const destination = body.destination ?? origin;
+		let sdp;
+		if (PeerConnection.have_conn(origin.kad_id)) {
+			// Do nothing.
+		} else if (body.bucket !== undefined) {
+			if (bucket_index(our_peerid.kad_id, origin.kad_id) == body.bucket && routing_table.space_available_bucket(origin.kad_id)) {
+				sdp = await PeerConnection.handle_connect(origin);
+				return;
 			}
+		} else {
+			// This is a sibling connect_request
+			// TODO: make sure that their sibling list would have space for us.
+			if (routing_table.space_available_sibling_list(origin.kad_id)) {
+				sdp = await PeerConnection.handle_connect(origin);
+			}
+		}
+		if (sdp) {
+			await routing_table.source_route(back_path_parsed, {
+				type: 'connect',
+				nonce: body.nonce,
+				sdp
+			});
+		} else {
+			// Since we couldn't fit the sender into our routing table, just route the message onward.
+			const {body, body_sig, back_path} = JSON.parse(data);
+			await routing_table.kad_route_data(destination.kad_id, {body, body_sig, back_path}, (a, b) => a !== b);
+			// TODO: Routing acknowledgement
 		}
 	} else if (body.type == 'connect') {
 		// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
@@ -183,46 +178,27 @@ export async function message_handler({ data }) {
 			});
 		}
 	}
-	// if (body.type == 'lookup_node') {
-	// 	if (origin == our_peerid) return;
-	// 	const node = await PeerId.from_encoded(body.node);
-	// 	let closer = routing_table.lookup(node.kad_id);
-	// 	await source_route(back_path_parsed, {
-	// 		type: 'lookup_ack',
-	// 		nonce: body.nonce,
-	// 		closer: closer.map(conn => conn.other_id.public_key_encoded)
-	// 	});
-	// 	// Only consider routing the lookup to peers that are closer than our own peer_id, and also not the original sender
-	// 	const our_dst = kad_dst(our_peerid.kad_id, node.kad_id);
-	// 	closer = closer.filter(con => con.other_id != origin && kad_dst(con.other_id.kad_id, node.kad_id) < our_dst);
 
-	// 	// If there's still a closer peer, that we have a connection to, then route the lookup to that peer
-	// 	if (closer.length > 0) {
-	// 		// Route the lookup to the closest node:
-	// 		const {body, body_sig, back_path} = JSON.parse(data);
-	// 		const back_path_sig = await our_peerid.sign(closer[0].other_id.public_key_encoded + body_sig);
-	// 		closer[0].send(JSON.stringify({
-	// 			body, body_sig,
-	// 			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
-	// 		}));
-	// 	}
+	// Sniff Back path and consider connecting to the peers in it:
+	// (We sniff the back_path after handling the message so that we don't send a connect_request after having already sent back a connect message)
+	// sniff_backpath(back_path_parsed);
+}
 
-	// 	// TODO: Sniff the back path for any peers we'd like to connect to?
-	// } else if (body.type == 'lookup_value') {
-	// 	// TODO: check our stored values
-	// } else if (body.type == 'lookup_ack') {
-	// 	const peers = await Promise.all(body.closer.map(encoded => PeerId.from_encoded(encoded)));
-	// 	for (const peer of peers) {
-	// 		sniff_backpath([peer, ...back_path_parsed]);
-	// 	}
-	// } else if (body.type == 'connect') {
-	// 	const sdp = await PeerConnection.handle_connect(origin, body.sdp);
-	// 	if (sdp) {
-	// 		await source_route(back_path_parsed, {
-	// 			type: 'connect',
-	// 			nonce: body.nonce,
-	// 			sdp
-	// 		});
-	// 	}
-	// }
+async function sniff_backpath(back_path_parsed,) {
+	for (let i = 0; i < back_path_parsed.length; ++i) {
+		const pid = back_path_parsed[i];
+		
+		if (pid == our_peerid || PeerConnection.have_conn(pid.kad_id)) continue;
+
+		const path = back_path_parsed.slice(i);
+		let bucket_i = routing_table.space_available_bucket(pid.kad_id);
+		
+		if (routing_table.space_available_sibling_list(pid.kad_id)) {
+			// Send a sibling connect message:
+			await routing_table.source_route(path, sibling_request_connect());
+		} else if (bucket_i != -1) {
+			// Send a bucket connect message:
+			// await routing_table.source_route(path, kbucket_request_connect(bucket_i));
+		}
+	}
 }

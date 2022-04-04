@@ -15,9 +15,9 @@ export function lin_dst(a, b) {
 export function xor_dst(a, b) {
 	return a ^ b;
 }
-export function bucket_index(kad_id) {
+export function bucket_index(kad_id, b = our_peerid.kad_id) {
 	// if (kad_id == our_peerid.kad_id) throw new Error("There's no bucket for our own peer_id.");
-	let t = kad_id ^ our_peerid.kad_id;
+	let t = kad_id ^ b;
 	if (t == 0n) return 256;
 	let i = 0;
 	while ((t >>= 1n) > 0n) ++i;
@@ -28,15 +28,33 @@ class RoutingTable {
 	#siblings_above = [];
 	#siblings_below = [];
 	// Kbuckets is an array of sets:
+	// TODO: Also store the buckets in a list by when they were refreshed so that we can refresh lists as needed.
 	#kbuckets = new Array(255);
+	// TODO: maintain a pending list of connections that we can use to backfill our routing_table if it starts to empty.  It would contain the connections that we keep open to let peers bootstrap into the network.
 	#bucket(kad_id) {
 		return this.#kbuckets[bucket_index(kad_id)];
+	}
+	sibling_range() {
+		const sib_belowest = this.#siblings_below[this.#siblings_below.length - 1]?.other_id?.public_key_encoded;
+		const sib_below_count = this.#siblings_below.length;
+		const sib_aboveest = this.#siblings_above[this.#siblings_above.length - 1]?.other_id?.public_key_encoded;
+		const sib_above_count = this.#siblings_above.length;
+		return {sib_aboveest, sib_above_count, sib_belowest, sib_below_count};
 	}
 	space_available_sibling_list(kad_id) {
 		// Check if we have space in our sibling list
 		const list = (kad_id < our_peerid.kad_id) ? this.#siblings_below : this.#siblings_above;
 		if (list.length < s) return list;
 		if (s > 0 && lin_dst(our_peerid.kad_id, kad_id) < lin_dst(our_peerid.kad_id, list[list.length - 1].other_id.kad_id)) return list;
+	}
+	space_available_bucket(kad_id) {
+		// TODO: walk up and check if there's an open bucket anywhere greater than the bucket it actually belongs in?  If we do that then we would potentially have a problem with needing to displace connections in our kbuckets.
+		const i = bucket_index(kad_id);
+		if (this.#kbuckets[i]?.size ?? k < k) {
+			return i;
+		} else {
+			return -1;
+		}
 	}
 	*siblings() {
 		yield* this.#siblings_below;
@@ -46,11 +64,6 @@ class RoutingTable {
 		for (const s of this.siblings()) {
 			if (s.other_id.kad_id == kad_id) return s;
 		}
-	}
-	space_available(kad_id) {
-		if (this.space_available_sibling_list(kad_id)) return true;
-		// Check if there's space in the kbuckets:
-		return (this.#bucket(kad_id)?.size ?? k) < k;
 	}
 	insert(connection, already_claimed = false) {
 		const kad_id = connection.other_id.kad_id;
