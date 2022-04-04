@@ -104,8 +104,9 @@ class RoutingTable {
 		if (below_ind != -1) displaced = this.#siblings_below.splice(below_ind, 1)[0];
 		if (above_ind != -1) displaced = this.#siblings_above.splice(above_ind, 1)[0];
 		if (displaced) {
-			// Backfill the sibling list from our routing table?
+			// TODO: Backfill the sibling list from our routing table?
 			displaced.release();
+			this.events.dispatchEvent(new CustomEvent('old-sibling', { detail: displaced }));
 			return;
 		}
 
@@ -224,6 +225,7 @@ class RoutingTable {
 			body, body_sig,
 			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
 		}));
+		// TODO: send a routing_acknowledge
 	}
 }
 export const routing_table = new RoutingTable();

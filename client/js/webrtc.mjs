@@ -51,6 +51,7 @@ export class PeerConnection extends RTCPeerConnection {
 			id: 42
 		});
 		this.#hn_dc.onopen = () => {
+			clearTimeout(this.#connecting_timeout);
 			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
 			routing_table.insert(this);
 			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: this }));
@@ -64,7 +65,6 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#hn_dc.onmessage = message_handler;
 
 		this.ondatachannel = this.#ondatachannel.bind(this);
-		this.oniceconnectionstatechange = this.#oniceconnectionstatechange.bind(this);
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
@@ -100,25 +100,9 @@ export class PeerConnection extends RTCPeerConnection {
 			console.warn('Abandoning a peerconnection that is routable:', this);
 		}
 		this.close();
-		this.#oniceconnectionstatechange();
-	}
-	#oniceconnectionstatechange() {
-		if (this.#connecting_timeout) {
-			clearTimeout(this.#connecting_timeout);
-			this.#connecting_timeout = false;
-		}
-		if (this.iceConnectionState == 'failed' || this.iceConnectionState == 'disconnected') {
-			this.abandon();
-		} else if (this.iceConnectionState == 'checking') {
-			// Set a timeout so that we don't get a peer connection that lives in connecting forever.
-			this.#connecting_timeout = setTimeout(this.abandon.bind(this), 5000);
-		} else if (this.iceConnectionState == 'closed') {
-			// Cleanup as much as we can:
-			PeerConnection.connections.delete(this);
-			this.ondatachannel = undefined;
-			this.onconnectionstatechange = undefined;
-			if (this.#hn_dc) this.#hn_dc.onmessage = undefined;
-		}
+		PeerConnection.connections.delete(this);
+		this.ondatachannel = undefined;
+		this.#hn_dc.onmessage = undefined;
 	}
 	get_hn_dc() {
 		if (this.#hn_dc?.readyState == 'open') {
