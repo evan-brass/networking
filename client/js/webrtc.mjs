@@ -53,13 +53,13 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#hn_dc.onopen = () => {
 			clearTimeout(this.#connecting_timeout);
 			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-			routing_table.insert(this);
 			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: this }));
+			routing_table.insert(this);
 		};
 		this.#hn_dc.onclose = () => {
 			if (this.other_id) {
-				routing_table.delete(this);
 				PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: this }));
+				routing_table.delete(this);
 			}
 		};
 		this.#hn_dc.onmessage = message_handler;
@@ -203,6 +203,6 @@ export class PeerConnection extends RTCPeerConnection {
 PeerConnection.events.addEventListener('connected', ({ detail: new_conn}) => {
 	console.log('new connection: ', new_conn.other_id);
 });
-PeerConnection.events.addEventListener('connected', ({ detail: old_conn }) => {
+PeerConnection.events.addEventListener('disconnected', ({ detail: old_conn }) => {
 	console.log('lost connection: ', old_conn.other_id);
 });
