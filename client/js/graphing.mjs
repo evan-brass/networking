@@ -1,5 +1,6 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
-import { routing_table } from "./routing-table.mjs";
+import { bucket_index, routing_table } from "./routing-table.mjs";
+import { lin_dst } from "./routing-table.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -14,7 +15,7 @@ function position_pid(pid) {
     // We'll do that in two steps by first the bigints into [0, 5000) and then converting to number
     const rad = Number(pid.kad_id * 5000n / (2n ** 256n)) * (2 * Math.PI / 5000);
     const x = 1000 + Math.cos(rad) * 900;
-    const y = 1000 + Math.sin(rad) * 900;
+    const y = 1000 + -Math.sin(rad) * 900;
     return {x, y};
 }
 function draw_network() {
@@ -29,13 +30,14 @@ function draw_network() {
 
     // Draw out all of the peer_ids that we've ever seen
     for (const pid of PeerId.peer_ids.values()) {
-        const {value: conn, done: is_exact} = routing_table.lookup(pid.kad_id).next();
+        const connection = routing_table.lookup(pid.kad_id, (a, b) => a == b);
         const is_sibling = routing_table.is_sibling(pid.kad_id);
+        const bi = bucket_index(pid.kad_id);
         if (pid == our_peerid) {
             ctx.fillStyle = 'red';
         } else if (is_sibling) {
             ctx.fillStyle = 'orange';
-        } else if (is_exact && conn) {
+        } else if (connection) {
             ctx.fillStyle = 'blue';
         } else {
             ctx.fillStyle = 'black';
@@ -45,6 +47,8 @@ function draw_network() {
         ctx.arc(x, y, node_radius, 0, 2 * Math.PI);
         ctx.closePath();
         ctx.fill();
+        ctx.font = "30px bold sans-serif";
+        ctx.fillText(bi, x + 20, y + 10);
     }
 
     // Draw the sniffed connections

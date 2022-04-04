@@ -1,5 +1,5 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { routing_table } from "./routing-table.mjs";
+import { lin_dst, routing_table } from "./routing-table.mjs";
 import { PeerConnection } from './webrtc.mjs';
 
 function create_nonce() {
@@ -71,27 +71,35 @@ export async function lookup_node(kad_id) {
 }
 export async function announce_self() {
 	await routing_table.sibling_broadcast({
-		type: "we're siblings",
-		nonce: create_nonce()
+		type: "siblings",
+		nonce: create_nonce(),
+		siblings: Array.from(routing_table.siblings()).map(c => c.other_id.public_key_encoded)
 	});
 }
 
 async function sniff_backpath(back_path_parsed) {
-	for (let i = 0; i < back_path_parsed.length; ++i) {
-		const pid = back_path_parsed[i];
-		if (pid != our_peerid && routing_table.space_available(pid.kad_id)) {
-			// Try to create a peerconnection to this peer:
-			const sdp = await PeerConnection.handle_connect(pid);
-			if (sdp) {
-				await source_route(back_path_parsed.slice(i), {
-					type: 'connect',
-					nonce: create_nonce(),
-					sdp
-				});
-			}
-		}
-	}
+	// for (let i = 0; i < back_path_parsed.length; ++i) {
+	// 	const pid = back_path_parsed[i];
+	// 	if (pid != our_peerid && routing_table.space_available(pid.kad_id)) {
+	// 		// Try to create a peerconnection to this peer:
+	// 		const sdp = await PeerConnection.handle_connect(pid);
+	// 		if (sdp) {
+	// 			await source_route(back_path_parsed.slice(i), {
+	// 				type: 'connect',
+	// 				nonce: create_nonce(),
+	// 				sdp
+	// 			});
+	// 		}
+	// 	}
+	// }
 }
+
+routing_table.events.addEventListener('old-sibling', async () => {
+	await announce_self();
+});
+routing_table.events.addEventListener('new-sibling', async () => {
+	await announce_self();
+});
 
 export async function message_handler({ data }) {
 	const {origin, forward_path_parsed, body, back_path_parsed} = await verify_message(data);
@@ -102,11 +110,79 @@ export async function message_handler({ data }) {
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
 		await routing_table.forward(forward_path_parsed, data);
+		return;
 	}
 
 	console.log('Rec:', body);
 
 	// Handle the message:
+	if (body.type == 'siblings') {
+		// The sender thinks that we're siblings
+		if (!routing_table.is_sibling(origin.kad_id)) {
+			// But we don't think the sender is our sibling:
+			const constraint = (our_peerid.kad_id < origin.kad_id) ? (k, c) => c < k : (k, c) => c > k;
+			let closer = routing_table.lookup(origin.kad_id, constraint, lin_dst);
+			closer = closer.other_id.public_key_encoded;
+			await routing_table.source_route(back_path_parsed, {
+				type: 'not_siblings',
+				nonce: body.nonce,
+				closer
+			});
+		}
+		for (const sib of body.siblings) {
+			const pid = await PeerId.from_encoded(sib);
+			if (pid != our_peerid && !PeerConnection.have_conn(pid.kad_id) && routing_table.space_available_sibling_list(pid.kad_id)) {
+				// Make a new connection:
+				const sdp = await PeerConnection.handle_connect(pid);
+				if (sdp) {
+					await routing_table.source_route([pid, ...back_path_parsed], {
+						type: 'connect',
+						nonce: create_nonce(),
+						sdp
+					});
+				}
+			}
+		}
+	} else if (body.type == 'not_siblings') {
+		const closer = await PeerId.from_encoded(body.closer);
+		await routing_table.source_route([closer, ...back_path_parsed], {
+			type: 'connect_request',
+			nonce: create_nonce()
+		});
+	} else if (body.type == 'connect_request') {
+		if (body.bits) {
+			// TODO: handle kbucket connect_requests
+		} else {
+			// Handle a sibling connect request:
+			if (origin == our_peerid) return;
+			if (routing_table.space_available_sibling_list(origin.kad_id)) {
+				const sdp = await PeerConnection.handle_connect(origin, body.sdp);
+				// Accept the sibling_connect
+				if (sdp) {
+					await routing_table.source_route(back_path_parsed, {
+						type: 'connect',
+						nonce: body.nonce,
+						sdp
+					});
+				}
+			} else {
+				// Try to route the sibling_connect onward
+				const {body, body_sig, back_path} = JSON.parse(data);
+				await routing_table.kad_route_data(origin.kad_id, {body, body_sig, back_path}, (a, b) => a !== b);
+				// TODO: reply with a routing acknowledgement?
+			}
+		}
+	} else if (body.type == 'connect') {
+		// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
+		const sdp = await PeerConnection.handle_connect(origin, body.sdp);
+		if (sdp) {
+			await routing_table.source_route(back_path_parsed, {
+				type: 'connect',
+				nonce: body.nonce,
+				sdp
+			});
+		}
+	}
 	// if (body.type == 'lookup_node') {
 	// 	if (origin == our_peerid) return;
 	// 	const node = await PeerId.from_encoded(body.node);
@@ -150,67 +226,3 @@ export async function message_handler({ data }) {
 	// 	}
 	// }
 }
-
-const message_format = {
-	/**
-	 * The forward path is the intended path that this message will take.
-	 * The forward path is reversed (the target is the first item, the second to last hop is the second, etc.).
-	 * A peer routes to the first peer it has a connection two in the list or until it reaches it's own peer_id in which case it aborts with an unreachable error.
-	 * Because of this, hops that are in the forward_path can be skipped.
-	 * Once the target of the forward_path is reached (if the message continues being forwarded) the forward_path and forward_sig can be removed because all the needed routing information is held in the back_path and the forward_path is no longer relevant.
-	 */
-	forward_path: '<public_key_encoded>,<public_key_encoded>,...',
-	forward_sig: "", 
-	body: { // The body will be a JSON string, however we show it as an object here.
-		type: '',
-		nonce: "",
-		/* Additional Message Data */
-	},
-	body_sig: "", // The original sender's signature of the body.
-	back_path: [
-		'<public_key_encoded of the sender>.<signature of the public_key_encoded that they forwarded the message to>',
-		/**
-		 * The back_path is constructed as a message gets forwarded.  It reflects the actual path that a message takes.
-		 * A peer can use the back_path to construct a forward_path.  This is how replying works.
-		 * We need to make sure that it can't be tampered with by any intermediate routing peers:
-		 * 1. It must not be reorderable
-		 * 2. It must not be editable except to extend it at the tail.
-		 * 3. TODO: It must be message specific so that old back_paths can't be added to new messages
-		 * An entry in the backpath is the encoded public key of the sender + a signature of the public key of the peer that they are about to forward the message to (TODO: concatonated with the body_sig for the message).
-		 * Like the forward_path, the back_path is edited at the front.
-		 * By keeping the forward_path and (more importantly) the back_path separate from the body, we can sniff potentially useful routing information without needing to parse the message body.
-		 * To Check the validity of the back_path and to construct a forward_path:
-		 * 1. Check that the first entry is a signature of our encoded_public_key
-		 * 2. Check that subsequent entries have a valid signature for the preceding encoded_public_key
-		 */
-	]
-};
-
-const message_types = [
-	// Query type messages (these messages include a random nonce)
-	{	type: 'lookup_node',
-		node: '<public_key_encoded>'
-	}, {
-		type: 'lookup_value',
-		key: '<kad_id as hex>'
-	}, {
-		// TDOO:
-		type: 'store_value',
-		key: '<kad_id as hex>',
-		value: '<any reasonably sized string>'
-	}, {
-		// TODO: Message types to request / respond with addresses
-	}, {
-		// TODO: Send messages to siblings?
-	},
-	// Response type messages (these messages echo the nonce from the request)
-	{	type: 'lookup_ack',
-		closer: [ // max 5 closest peer_ids that this peer knows to that kad_id
-			'<public_key_encoded>'
-		]
-	}, {
-		// TODO:
-		type: 'lookup_value',
-		value: "<any reasonably sized string>"
-	}
-];

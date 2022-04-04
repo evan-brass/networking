@@ -151,6 +151,7 @@ export class PeerConnection extends RTCPeerConnection {
 			await this.setLocalDescription();
 			await this.#ice_done();
 			this.#making_offer = false;
+			if (this.localDescription == null) debugger;
 			return mung_sdp(this.localDescription);
 		}
 		// We're creating an answer.
@@ -167,10 +168,18 @@ export class PeerConnection extends RTCPeerConnection {
 		if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
 
 		// Check to make sure that we don't switch what peer is on the other side of this connection.
-		if (this.other_id && this.other_id !== other_id) {
+		if (other_id == our_peerid || (this.other_id && this.other_id !== other_id)) {
 			throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
 		}
+		for (const conn of PeerConnection.connections) {
+			if (conn !== this && conn.other_id == other_id) {
+				console.warn('Multiple Peer Connections to the same peer...');
+				this.abandon();
+				return;
+			}
+		}
 		this.other_id = other_id;
+
 
 		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
 		if (this.other_id.polite() || !offer_collision) {
@@ -201,4 +210,15 @@ export class PeerConnection extends RTCPeerConnection {
 		pc.other_id = origin;
 		return await pc.negotiate(description);
 	}
+	static have_conn(kad_id) {
+		for (const c of PeerConnection.connections) {
+			if (c?.other_id?.kad_id == kad_id) return c;
+		}
+	}
 }
+PeerConnection.events.addEventListener('connected', ({ detail: new_conn}) => {
+	console.log('new connection: ', new_conn.other_id);
+});
+PeerConnection.events.addEventListener('connected', ({ detail: old_conn }) => {
+	console.log('lost connection: ', old_conn.other_id);
+});

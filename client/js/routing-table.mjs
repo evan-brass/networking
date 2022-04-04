@@ -8,18 +8,23 @@ const k = 2;
 const s = 3;
 
 // Can't use Math.abs on bigint
-function lin_dst(a, b) {
+export function lin_dst(a, b) {
 	const ret = a - b;
 	return (ret < 0n) ? ret * -1n : ret;
 }
-function bucket_index(kad_id) {
+export function xor_dst(a, b) {
+	return a ^ b;
+}
+export function bucket_index(kad_id) {
 	// if (kad_id == our_peerid.kad_id) throw new Error("There's no bucket for our own peer_id.");
 	let t = kad_id ^ our_peerid.kad_id;
+	if (t == 0n) return 256;
 	let i = 0;
 	while ((t >>= 1n) > 0n) ++i;
-	return 254 - i;
+	return 255 - i;
 }
 class RoutingTable {
+	events = new EventTarget();
 	#siblings_above = [];
 	#siblings_below = [];
 	// Kbuckets is an array of sets:
@@ -27,55 +32,46 @@ class RoutingTable {
 	#bucket(kad_id) {
 		return this.#kbuckets[bucket_index(kad_id)];
 	}
-	#sibling_range() {
-		// Return the lowest kad_id of a sibling and the highest kad_id of a sibling
-		let low;
-		if (this.#siblings_below.length > 0) {
-			low = this.#siblings_below[this.#siblings_below.length - 1].other_id.kad_id;
-		} else {
-			low = our_peerid.kad_id;
-		}
-		let high;
-		if (this.#siblings_above.length > 0) {
-			high = this.#siblings_above[this.#siblings_above.length - 1].other_id.kad_id;
-		} else {
-			high = our_peerid.kad_id;
-		}
-		return { low, high };
-	}
-	#sibling_list(kad_id) {
+	space_available_sibling_list(kad_id) {
 		// Check if we have space in our sibling list
 		const list = (kad_id < our_peerid.kad_id) ? this.#siblings_below : this.#siblings_above;
 		if (list.length < s) return list;
 		if (s > 0 && lin_dst(our_peerid.kad_id, kad_id) < lin_dst(our_peerid.kad_id, list[list.length - 1].other_id.kad_id)) return list;
 	}
+	*siblings() {
+		yield* this.#siblings_below;
+		yield* this.#siblings_above;
+	}
 	is_sibling(kad_id) {
-		for (const sib of this.#siblings_below) {
-			if (sib.other_id.kad_id == kad_id) return sib;
-		}
-		for (const sib of this.#siblings_above) {
-			if (sib.other_id.kad_id == kad_id) return sib;
+		for (const s of this.siblings()) {
+			if (s.other_id.kad_id == kad_id) return s;
 		}
 	}
 	space_available(kad_id) {
-		if (this.#sibling_list(kad_id)) return true;
+		if (this.space_available_sibling_list(kad_id)) return true;
 		// Check if there's space in the kbuckets:
 		return (this.#bucket(kad_id)?.size ?? k) < k;
 	}
 	insert(connection, already_claimed = false) {
 		const kad_id = connection.other_id.kad_id;
-		const sib_list = this.#sibling_list(kad_id);
+		const sib_list = this.space_available_sibling_list(kad_id);
 		if (sib_list) {
 			let displaced;
 			if (sib_list.length >= s) {
 				displaced = sib_list.pop();
 			}
 			sib_list.push(connection);
-			connection.claim();
-			sib_list.sort((a, b) => {
-				(lin_dst(our_peerid.kad_id, a.other_id.kad_id) < lin_dst(our_peerid.kad_id, b.other_id.kad_id)) ? -1 : 1;
+			if (!already_claimed) connection.claim();
+			sib_list.sort(({other_id: {kad_id: a}}, {other_id: {kad_id: b}}) => {
+				const dst_a = lin_dst(our_peerid.kad_id, a);
+				const dst_b = lin_dst(our_peerid.kad_id, b);
+				return (dst_a < dst_b) ? -1 : 1;
 			});
-			if (displaced) this.insert(displaced, true);
+			this.events.dispatchEvent(new CustomEvent('new-sibling', { detail: connection }));
+			if (displaced) {
+				this.insert(displaced, true);
+				this.events.dispatchEvent(new CustomEvent('old-sibling', { detail: displaced }));
+			}
 		} else {
 			const i = bucket_index(kad_id);
 			if (this.#kbuckets[i] == undefined) this.#kbuckets[i] = new Set();
@@ -101,63 +97,47 @@ class RoutingTable {
 		}
 
 		// Remove from the rest of the table:
-		this.#bucket(connection.other_id.kad_id).delete(connection);
+		const bucket = this.#bucket(connection.other_id.kad_id);
+		if (bucket) bucket.delete(connection);
 	}
 	// TODO: lookup values?
-	*lookup(kad_id) {
-		const {low, high} = this.#sibling_range();
-		if (kad_id >= low && kad_id <= high) {
-			// If a lookup falls within our sibling range, check for an exact match.
-			const below = this.#siblings_below.find(c => c.other_id.kad_id == kad_id);
-			if (below) return below;
-			const above = this.#siblings_above.find(c => c.other_id.kad_id == kad_id);
-			if (above) return above;
+	// TODO: add the ability to lookup only values that are greater than kad_id or only less than kad_id (needed for sibling connect)
+	lookup(kad_id, constraint = (_kad_a, _kad_b) => true, dst_func = xor_dst) {
+		let closest, dst;
+		for (const s of this.siblings()) {
+			const t = dst_func(kad_id, s.other_id.kad_id);
+			if (constraint(kad_id, s.other_id.kad_id) && (dst === undefined || t < dst)) {
+				closest = s;
+				dst = t;
+			}
 		}
-		// Look through our kbuckets for closer peers:
-		let first_bucket = true;
-		let any_found = false;
 		for (let i = bucket_index(kad_id); i >= 0; --i) {
 			let bucket = this.#kbuckets[i];
 			if (bucket?.size ?? 0 > 0) {
-				if (first_bucket) {
-					any_found = true;
-					// If we're in the first bucket (which is the bucket that kad_id would be in) then first check if we have the exact kad_id in the bucket.  Otherwise return the items in oldest connection order as usual.
-					let conns = [];
-					for (const conn of bucket) {
-						if (conn.other_id.kad_id == kad_id) {
-							return conn;
-						}
-						conns.push(conn);
+				for (const c of bucket) {
+					const t = dst_func(kad_id, c.other_id.kad_id);
+					if (constraint(kad_id, c.other_id.kad_id) && (dst === undefined || t < dst)) {
+						closest = c;
+						dst = t;
 					}
-					bucket = conns;
-				}
-				yield* bucket;
-			}
-			first_bucket = false;
-		}
-
-		// If we didn't have any results from our kbuckets, then try to return a sibling that is closer to the kad_id than we are.
-		const our_dst = lin_dst(our_peerid.kad_id, kad_id);
-		let closest, closest_dst;
-		if (!any_found) {
-			const list = (kad_id < our_peerid.kad_id) ? this.#siblings_below : this.#siblings_above;
-			for (const sibling of list) {
-				const sib_dst = lin_dst(sibling.other_id.kad_id, kad_id);
-				if (sib_dst < our_dst && (!closest || sib_dst < closest_dst)) {
-					closest = sibling;
-					closest_dst = sib_dst;
 				}
 			}
 		}
-		if (closest) yield closest;
+		return closest;
 	}
 
 	// Routing:
 	async source_route(path, msg) {
+		// Check for loops in the path:
+		const loop_check = new Set();
 		for (const pid of path) {
-			const { value: connection, done: is_exact} = this.lookup(pid.kad_id).next();
-			if (is_exact && connection) {
-				console.log('Snd:', body, connection.other_id);
+			if (loop_check.has(pid)) throw new Error("Found a routing loop in the path");
+			loop_check.add(pid);
+		}
+		for (const pid of path) {
+			const connection = this.lookup(pid.kad_id, (a, b) => a == b);
+			if (connection) {
+				console.log('Snd:', msg);
 				const body = JSON.stringify(msg);
 				const body_sig = await our_peerid.sign(body);
 				// TODO: only include the forward path if we aren't sending directly to the intended target
@@ -200,8 +180,8 @@ class RoutingTable {
 		const {forward_path, forward_sig, body, body_sig, back_path} = JSON.parse(data);
 		for (const pid of forward_path_parsed) {
 			if (pid == our_peerid) break;
-			const {value: connection, done: is_exact} = this.lookup(pid.kad_id).next();
-			if (is_exact && connection) {
+			const connection = this.lookup(pid.kad_id, (a, b) => a == b);
+			if (connection) {
 				console.log('Fwd:', body);
 				const back_path_sig = await our_peerid.sign(connection.other_id.public_key_encoded + body_sig);
 				connection.send(JSON.stringify({
@@ -220,8 +200,8 @@ class RoutingTable {
 		const back_path = [];
 		await this.kad_route_data(kad_id, {body, body_sig, back_path});
 	}
-	async kad_route_data(kad_id, { body, body_sig, back_path }) {
-		let { value: connection } = this.lookup(kad_id).next();
+	async kad_route_data(kad_id, { body, body_sig, back_path }, constraint) {
+		let connection = this.lookup(kad_id, constraint);
 		if (!connection) throw new Error('Routing Failed: Kad');
 
 		console.log('Snd:', body, connection.other_id)
