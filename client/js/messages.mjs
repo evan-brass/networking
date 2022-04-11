@@ -104,8 +104,6 @@ export async function message_handler({ data }) {
 		return;
 	}
 
-	console.log('Rec:', body);
-
 	// Handle the message:
 	if (body.type == 'siblings') {
 		// The sender thinks that we're siblings

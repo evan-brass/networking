@@ -3,7 +3,7 @@ import { announce_self, refresh_bucket } from "./messages.mjs";
 import { PeerId } from "./peer-id.mjs";
 import { PeerConnection } from "./webrtc.mjs";
 
-function timeout(t = 5000) {
+function timeout(t = 10000) {
 	return new Promise(r => setTimeout(r, t));
 }
 

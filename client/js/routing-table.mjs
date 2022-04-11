@@ -255,11 +255,3 @@ class RoutingTable {
 	}
 }
 export const routing_table = new RoutingTable();
-console.log(routing_table);
-
-routing_table.events.addEventListener('new-sibling', ({ detail: new_sib}) => {
-	console.log('new sibling', new_sib);
-});
-routing_table.events.addEventListener('old-sibling', ({ detail: new_sib}) => {
-	console.log('new sibling', new_sib);
-});

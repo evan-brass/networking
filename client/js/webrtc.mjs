@@ -66,8 +66,6 @@ export class PeerConnection extends RTCPeerConnection {
 		};
 		this.#hn_dc.onmessage = message_handler;
 
-		this.ondatachannel = this.#ondatachannel.bind(this);
-
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
 		// Close connections that get disconnected or fail (alternatively we could restartice and then timeout);
@@ -179,9 +177,6 @@ export class PeerConnection extends RTCPeerConnection {
 			}
 		}
 	}
-	#ondatachannel({ channel }) {
-		console.log('new Channel:', channel);
-	}
 	static async handle_connect(origin, description) {
 		// Find the peerconnection that has origin and try to negotiate it:
 		const existing = PeerConnection.connections.get(origin);
@@ -196,9 +191,3 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 }
-PeerConnection.events.addEventListener('connected', ({ detail: new_conn}) => {
-	console.log('new connection: ', new_conn.other_id);
-});
-PeerConnection.events.addEventListener('disconnected', ({ detail: old_conn }) => {
-	console.log('lost connection: ', old_conn.other_id);
-});

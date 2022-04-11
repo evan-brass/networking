@@ -24,7 +24,6 @@ async function get_ws(tracker) {
 
 		ws.onmessage = async ({data}) => {
 			const msg = JSON.parse(data);
-			console.log('track', msg);
 
 			if (msg.interval) {
 				const info_hash = msg.info_hash;
