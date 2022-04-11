@@ -122,7 +122,7 @@ export async function message_handler({ data }) {
 		}
 		for (const sib of body.siblings) {
 			const pid = await PeerId.from_encoded(sib);
-			if (pid != our_peerid && !PeerConnection.have_conn(pid.kad_id) && routing_table.space_available_sibling_list(pid.kad_id)) {
+			if (pid != our_peerid && !PeerConnection.connections.has(pid) && routing_table.space_available_sibling_list(pid.kad_id)) {
 				// Make a new connection:
 				const sdp = await PeerConnection.handle_connect(pid);
 				if (sdp) {
@@ -140,7 +140,7 @@ export async function message_handler({ data }) {
 	} else if (body.type == 'request_connect') {
 		const target = (body.bucket !== undefined) ? BigInt('0x' + body.target) : origin.kad_id;
 		let sdp;
-		if (PeerConnection.have_conn(origin.kad_id)) {
+		if (PeerConnection.connections.has(origin)) {
 			// Do nothing.
 		} else if (body.bucket !== undefined) {
 			if (bucket_index(our_peerid.kad_id, origin.kad_id) == body.bucket && routing_table.space_available_bucket(origin.kad_id)) {
@@ -186,7 +186,7 @@ async function sniff_backpath(back_path_parsed,) {
 	for (let i = 0; i < back_path_parsed.length; ++i) {
 		const pid = back_path_parsed[i];
 		
-		if (pid == our_peerid || PeerConnection.have_conn(pid.kad_id)) continue;
+		if (pid == our_peerid || PeerConnection.connections.has(pid)) continue;
 
 		const path = back_path_parsed.slice(i);
 		let bucket_i = routing_table.space_available_bucket(pid.kad_id);

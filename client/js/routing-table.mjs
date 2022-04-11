@@ -197,26 +197,25 @@ class RoutingTable {
 			if (loop_check.has(pid)) throw new Error("Found a routing loop in the path");
 			loop_check.add(pid);
 		}
-		// TODO: Instead of using PeerConnection.connections, store unclaimed connections in a pending list. That way PeerConnection.connections could be a map from peer_id -> PeerConnection
+		
 		for (const pid of path) {
-			for (const con of PeerConnection.connections) {
-				if (con.other_id == pid && con.is_open()) {
-					// Only include the forward path if we aren't sending directly to the intended target
-					if (path[0] === con.other_id) {
-						forward_path = undefined;
-						forward_sig = undefined;
-					}
-					const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
-					const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
-
-					con.send(JSON.stringify({
-						origin: our_peerid.public_key_encoded,
-						forward_path, forward_sig,
-						body, body_sig,
-						back_path: new_back_path
-					}));
-					return;
+			const con = PeerConnection.connections.get(pid);
+			if (con !== undefined && con.is_open()) {
+				// Only include the forward path if we aren't sending directly to the intended target
+				if (path[0] === con.other_id) {
+					forward_path = undefined;
+					forward_sig = undefined;
 				}
+				const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
+				const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
+	
+				con.send(JSON.stringify({
+					origin: our_peerid.public_key_encoded,
+					forward_path, forward_sig,
+					body, body_sig,
+					back_path: new_back_path
+				}));
+				return;
 			}
 		}
 		throw new Error('Routing Failed: Path');

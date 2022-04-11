@@ -30,7 +30,9 @@ async function mung_sdp({type, sdp}) {
  * Our peer connection is a special RTCPeerConnection that also manages the RTCDataChannel for the hyperspace-network, as well as any other datachannels that are signalled (For GossipSub, or blockchain needs).  I'm trying to not have a separation between the routing table (peer_id -> websocket | rtcdatachannel) and the peer table (peer_id -> rtcpeerconnection) as that wasn't working very well.
  */
 export class PeerConnection extends RTCPeerConnection {
-	static connections = new Set();
+	// Connections is a map from PeerId -> PeerConnection  We use it to make sure we don't open two connections to the same peer.
+	static connections = new Map();
+	// Events announces when our peer connections open or close.
 	static events = new EventTarget();
 	#hn_dc = null;
 	#connecting_timeout = false;
@@ -70,10 +72,8 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
 		// Close connections that get disconnected or fail (alternatively we could restartice and then timeout);
 		this.onconnectionstatechange = () => {
-			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.close();
+			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.abandon();
 		};
-
-		PeerConnection.connections.add(this);
 	}
 	#claimed_timeout_func() {
 		if (this.#claimed == 0) {
@@ -107,7 +107,7 @@ export class PeerConnection extends RTCPeerConnection {
 			console.warn('Abandoning a peerconnection that is routable:', this);
 		}
 		this.close();
-		PeerConnection.connections.delete(this);
+		PeerConnection.connections.delete(this.other_id);
 		this.ondatachannel = undefined;
 		this.#hn_dc.onmessage = undefined;
 	}
@@ -157,15 +157,14 @@ export class PeerConnection extends RTCPeerConnection {
 		if (other_id == our_peerid || (this.other_id && this.other_id !== other_id)) {
 			throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
 		}
-		for (const conn of PeerConnection.connections) {
-			if (conn !== this && conn.other_id == other_id) {
-				console.warn('Multiple Peer Connections to the same peer...');
-				this.abandon();
-				return;
-			}
+		const existing = PeerConnection.connections.get(other_id)
+		if (existing === undefined) {
+			PeerConnection.connections.set(other_id, this);
+			this.other_id = other_id;
+		} else if (existing !== this) {
+			this.abandon();
+			throw new Error("Cannot negotiate multiple connections with the same peer.");
 		}
-		this.other_id = other_id;
-
 
 		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
 		if (this.other_id.polite() || !offer_collision) {
@@ -185,20 +184,15 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	static async handle_connect(origin, description) {
 		// Find the peerconnection that has origin and try to negotiate it:
-		for (const pc of PeerConnection.connections) {
-			if (pc.other_id == origin) {
-				return await pc.negotiate(description);
-			}
-		}
-
-		// If there is no active peer connection, and this is an offer, then create one.
-		const pc = new PeerConnection();
-		pc.other_id = origin;
-		return await pc.negotiate(description);
-	}
-	static have_conn(kad_id) {
-		for (const c of PeerConnection.connections) {
-			if (c?.other_id?.kad_id == kad_id) return c;
+		const existing = PeerConnection.connections.get(origin);
+		if (existing !== undefined) {
+			return await existing.negotiate(description);
+		} else {
+			// If there is no active peer connection, and this is an offer, then create one.
+			const pc = new PeerConnection();
+			pc.other_id = origin;
+			PeerConnection.connections.set(origin, pc);
+			return await pc.negotiate(description);
 		}
 	}
 }

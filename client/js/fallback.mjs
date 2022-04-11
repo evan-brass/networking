@@ -21,7 +21,6 @@ async function heartbeat() {
 
 	PeerId.cleanup_cache();
 
-	console.log("Heartbeat Finished.");
-	setTimeout(heartbeat, 30000);
 }
 heartbeat();
+setInterval(heartbeat, 10000);
