@@ -1,5 +1,5 @@
 import { bootstrap_tracker } from "./bootstrap.mjs";
-import { announce_self } from "./messages.mjs";
+import { announce_self, refresh_bucket } from "./messages.mjs";
 import { PeerId } from "./peer-id.mjs";
 import { PeerConnection } from "./webrtc.mjs";
 
@@ -13,6 +13,8 @@ async function heartbeat() {
 		await Promise.race([b, timeout()]);
 	} else {
 		await announce_self();
+
+		await refresh_bucket();
 	}
 
 	// TODO: refresh a stale bucket if needed.
@@ -20,6 +22,6 @@ async function heartbeat() {
 	PeerId.cleanup_cache();
 
 	console.log("Heartbeat Finished.");
+	setTimeout(heartbeat, 30000);
 }
 heartbeat();
-setTimeout(heartbeat, 30000);

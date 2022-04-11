@@ -68,6 +68,10 @@ export class PeerConnection extends RTCPeerConnection {
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
+		// Close connections that get disconnected or fail (alternatively we could restartice and then timeout);
+		this.onconnectionstatechange = () => {
+			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.close();
+		};
 
 		PeerConnection.connections.add(this);
 	}
@@ -88,8 +92,11 @@ export class PeerConnection extends RTCPeerConnection {
 			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
 		}
 	}
+	is_open() {
+		return this.#hn_dc.readyState == 'open';
+	}
 	send(data) {
-		if (this.#hn_dc?.readyState == 'open') {
+		if (this.is_open()) {
 			this.#hn_dc.send(data);
 		} else {
 			throw new Error("The datachannel for this peer connection is not in an open readyState.");
@@ -103,11 +110,6 @@ export class PeerConnection extends RTCPeerConnection {
 		PeerConnection.connections.delete(this);
 		this.ondatachannel = undefined;
 		this.#hn_dc.onmessage = undefined;
-	}
-	get_hn_dc() {
-		if (this.#hn_dc?.readyState == 'open') {
-			return this.#hn_dc;
-		}
 	}
 	#ice_done() {
 		return new Promise(res => {

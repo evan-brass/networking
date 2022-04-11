@@ -1,9 +1,9 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { bucket_index, lin_dst, routing_table } from "./routing-table.mjs";
+import { bucket_index, constraint_backpath, lin_dst, routing_table } from "./routing-table.mjs";
 import { PeerConnection } from './webrtc.mjs';
 
 function create_nonce() {
-    return Array.from(crypto.getRandomValues(new Uint8Array(4))).map(v => v.toString(16).padStart(2, '0')).join('');
+	return Array.from(crypto.getRandomValues(new Uint8Array(4))).map(v => v.toString(16).padStart(2, '0')).join('');
 }
 
 export async function verify_message(data) {
@@ -63,19 +63,21 @@ export async function verify_message(data) {
 	};
 }
 
-// Trigger a lookup_node
-export async function lookup_node(kad_id) {
-	await routing_table.kad_route(kad_id, {
-		type: 'lookup_node',
-		nonce: create_nonce(),
-		kad_id
-	});
-}
 export async function announce_self() {
 	await routing_table.sibling_broadcast({
 		type: "siblings",
 		nonce: create_nonce(),
 		siblings: Array.from(routing_table.siblings()).map(c => c.other_id.public_key_encoded)
+	});
+}
+export async function refresh_bucket() {
+	const bucket = routing_table.first_empty();
+	const target = routing_table.random_kad_id(bucket);
+	await routing_table.kad_route(target, {
+		type: 'request_connect',
+		nonce: create_nonce(),
+		target: target.toString(16),
+		bucket
 	});
 }
 function sibling_request_connect() {
@@ -84,9 +86,6 @@ function sibling_request_connect() {
 		nonce: create_nonce(),
 		...routing_table.sibling_range()
 	};
-}
-function kbucket_request_connect(kbucket) {
-	// TODO: generate a random kad_id within the bucket and make a request_connect message with that destination.
 }
 
 routing_table.events.addEventListener('old-sibling', async () => {
@@ -101,7 +100,7 @@ export async function message_handler({ data }) {
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
-		await routing_table.forward(forward_path_parsed, data);
+		await routing_table.source_route_data(forward_path_parsed, JSON.parse(data));
 		return;
 	}
 
@@ -138,15 +137,14 @@ export async function message_handler({ data }) {
 	} else if (body.type == 'not_siblings') {
 		const closer = await PeerId.from_encoded(body.closer);
 		await routing_table.source_route([closer, ...back_path_parsed], sibling_request_connect());
-	} else if (body.type == 'connect_request') {
-		const destination = body.destination ?? origin;
+	} else if (body.type == 'request_connect') {
+		const target = (body.bucket !== undefined) ? BigInt('0x' + body.target) : origin.kad_id;
 		let sdp;
 		if (PeerConnection.have_conn(origin.kad_id)) {
 			// Do nothing.
 		} else if (body.bucket !== undefined) {
 			if (bucket_index(our_peerid.kad_id, origin.kad_id) == body.bucket && routing_table.space_available_bucket(origin.kad_id)) {
 				sdp = await PeerConnection.handle_connect(origin);
-				return;
 			}
 		} else {
 			// This is a sibling connect_request
@@ -164,7 +162,7 @@ export async function message_handler({ data }) {
 		} else {
 			// Since we couldn't fit the sender into our routing table, just route the message onward.
 			const {body, body_sig, back_path} = JSON.parse(data);
-			await routing_table.kad_route_data(destination.kad_id, {body, body_sig, back_path}, (a, b) => a !== b);
+			await routing_table.kad_route_data(target, {body, body_sig, back_path}, constraint_backpath(back_path_parsed));
 			// TODO: Routing acknowledgement
 		}
 	} else if (body.type == 'connect') {

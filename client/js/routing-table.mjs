@@ -1,6 +1,18 @@
 import { our_peerid } from "./peer-id.mjs";
+import { PeerConnection } from "./webrtc.mjs";
 
 // There are existing k-bucket implementations out there but I don't think they use bigint.
+
+// Constraint functions:
+export function constraint_backpath(back_path_parsed, dst_func = xor_dst) {
+	const back_path_kad_ids = back_path_parsed.map(pid => pid.kad_id);
+	return (a, b) => {
+		// Make sure that b is closer to the destination than our own peer_id:
+		dst_func(a, b) < dst_func(a, our_peerid.kad_id) &&
+		// Make sure that we don't route to somewhere that the message has already been.
+		!back_path_kad_ids.includes(b);
+	};
+}
 
 // k is the max number of items that can be held inside a KBucketLeaf
 const k = 2;
@@ -31,6 +43,34 @@ class RoutingTable {
 	// TODO: Also store the buckets in a list by when they were refreshed so that we can refresh lists as needed.
 	#kbuckets = new Array(255);
 	// TODO: maintain a pending list of connections that we can use to backfill our routing_table if it starts to empty.  It would contain the connections that we keep open to let peers bootstrap into the network.
+	random_kad_id(bucket) {
+		// Generate a random 256bit number:
+		let rand = crypto.getRandomValues(new Uint8Array(32));
+		rand = Array.from(rand).map(v => v.toString(16).padStart(2, '0')).join('');
+		rand = BigInt('0x' + rand);
+		
+		// Get rid of the top bits of the random number:
+		rand = BigInt.asUintN(256 - bucket, rand);
+
+		// Get bucket_index prefix from our_peerid
+		const shift = 256n - BigInt(bucket);
+		const prefix = (our_peerid.kad_id >> shift) << shift;
+
+		// There's a 50/50 chance that our random number shares more of the prefix than we want.  If it does then we bitwise negate rand.
+		if (bucket_index(prefix | rand) != bucket) {
+			rand = ~rand;
+		}
+
+		return BigInt.asUintN(256, prefix | rand);
+	}
+	first_empty() {
+		for (let i = 0; i < this.#kbuckets.length; ++i) {
+			const bucket = this.#kbuckets[i];
+			if (bucket == undefined || bucket.size < k) {
+				return i;
+			}
+		}
+	}
 	#bucket(kad_id) {
 		return this.#kbuckets[bucket_index(kad_id)];
 	}
@@ -142,40 +182,47 @@ class RoutingTable {
 
 	// Routing:
 	async source_route(path, msg) {
+		const body = JSON.stringify(msg);
+		const body_sig = await our_peerid.sign(body);
+		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
+		const forward_sig = await our_peerid.sign(forward_path);
+
+		await this.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path: []});
+	}
+	// source_route_data is also used for forwarding
+	async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path}) {
 		// Check for loops in the path:
 		const loop_check = new Set();
 		for (const pid of path) {
 			if (loop_check.has(pid)) throw new Error("Found a routing loop in the path");
 			loop_check.add(pid);
 		}
+		// TODO: Instead of using PeerConnection.connections, store unclaimed connections in a pending list. That way PeerConnection.connections could be a map from peer_id -> PeerConnection
 		for (const pid of path) {
-			const connection = this.lookup(pid.kad_id, (a, b) => a == b);
-			if (connection) {
-				console.log('Snd:', msg);
-				const body = JSON.stringify(msg);
-				const body_sig = await our_peerid.sign(body);
-				// TODO: only include the forward path if we aren't sending directly to the intended target
-				let forward_path, forward_sig;
-				if (path[0] !== connection.other_id) {
-					forward_path = path.map(pid => pid.public_key_encoded).join(',');
-					forward_sig = await our_peerid.sign(forward_path);
+			for (const con of PeerConnection.connections) {
+				if (con.other_id == pid && con.is_open()) {
+					// Only include the forward path if we aren't sending directly to the intended target
+					if (path[0] === con.other_id) {
+						forward_path = undefined;
+						forward_sig = undefined;
+					}
+					const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
+					const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
+
+					con.send(JSON.stringify({
+						origin: our_peerid.public_key_encoded,
+						forward_path, forward_sig,
+						body, body_sig,
+						back_path: new_back_path
+					}));
+					return;
 				}
-				const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
-				const back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`];
-				connection.send(JSON.stringify({
-					origin: our_peerid.public_key_encoded,
-					forward_path, forward_sig,
-					body, body_sig,
-					back_path
-				}));
-				return;
 			}
 		}
 		throw new Error('Routing Failed: Path');
 	}
 	async sibling_broadcast(msg) {
 		const body = JSON.stringify(msg);
-		console.log('SBc:', msg);
 		const body_sig = await our_peerid.sign(body);
 		const back_path = [];
 		await this.sibling_broadcast_data({ body, body_sig, back_path });
@@ -190,35 +237,15 @@ class RoutingTable {
 			}));
 		}
 	}
-	async forward(forward_path_parsed, data) {
-		const {forward_path, forward_sig, body, body_sig, back_path} = JSON.parse(data);
-		for (const pid of forward_path_parsed) {
-			if (pid == our_peerid) break;
-			const connection = this.lookup(pid.kad_id, (a, b) => a == b);
-			if (connection) {
-				console.log('Fwd:', body);
-				const back_path_sig = await our_peerid.sign(connection.other_id.public_key_encoded + body_sig);
-				connection.send(JSON.stringify({
-					forward_path, forward_sig,
-					body, body_sig,
-					back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
-				}));
-				return;
-			}
-		}
-		throw new Error("Destination Unreachable");
-	}
-	async kad_route(kad_id, msg) {
+	async kad_route(kad_id, msg, constraint) {
 		const body = JSON.stringify(msg);
 		const body_sig = await our_peerid.sign(body);
 		const back_path = [];
-		await this.kad_route_data(kad_id, {body, body_sig, back_path});
+		await this.kad_route_data(kad_id, {body, body_sig, back_path}, constraint);
 	}
 	async kad_route_data(kad_id, { body, body_sig, back_path }, constraint) {
 		let connection = this.lookup(kad_id, constraint);
 		if (!connection) throw new Error('Routing Failed: Kad');
-
-		console.log('Snd:', body, connection.other_id)
 
 		const back_path_sig = await our_peerid.sign(connection.other_id.public_key_encoded + body_sig);
 		connection.send(JSON.stringify({
