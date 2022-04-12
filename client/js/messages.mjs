@@ -49,7 +49,8 @@ export async function verify_message(data) {
 		// Parse the body:
 		body = JSON.parse(body);
 		// TODO: Check if the body has all required fields?
-		if (typeof body?.nonce != 'string') throw new Error('body missing nonce');
+		// I'm starting to think that we actually just need an expiration most of the time - not a nonce.  Connect messages don't need a nonce, because it is locked to a peer_id keypair.  For replies that need a nonce we could just use the body_sig of the request message instead.
+		// if (typeof body?.nonce != 'string') throw new Error('body missing nonce');
 	} else {
 		// TODO: Throw an error?
 		body = undefined;
@@ -97,6 +98,8 @@ routing_table.events.addEventListener('new-sibling', async () => {
 
 export async function message_handler({ data }) {
 	const {origin, forward_path_parsed, body, back_path_parsed} = await verify_message(data);
+
+	// TODO: Broadcast messages (siblings, and topics) can't be forwarded so make sure that they don't have a forward_path.  We should also check that the back_path is just a single entry and that it came in on a direct connection that we have with the peer.
 
 	// Forward the message if we're not the intended target:
 	if (forward_path_parsed && forward_path_parsed[0] !== our_peerid) {
