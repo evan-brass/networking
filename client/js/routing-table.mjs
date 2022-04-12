@@ -255,3 +255,10 @@ class RoutingTable {
 	}
 }
 export const routing_table = new RoutingTable();
+
+PeerConnection.events.addEventListener('connected', ({ detail: { connection }}) => {
+	routing_table.insert(connection);
+});
+PeerConnection.events.addEventListener('disconnected', ({ detail: { connection }}) => {
+	routing_table.delete(connection);
+});

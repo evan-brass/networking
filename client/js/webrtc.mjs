@@ -1,12 +1,9 @@
-import { message_handler } from "./messages.mjs";
 import { iceServers } from "./network-props.mjs";
-import { privateKey, PeerId, our_peerid } from "./peer-id.mjs";
-import { base64_decode, base64_encode, P256 } from "./lib.mjs";
-import { routing_table } from "./routing-table.mjs";
-
+import { PeerId, our_peerid } from "./peer-id.mjs";
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
 // s=<base64-public-key>.<base64 sec-1 signature>
+// Technically, the s field is the session description which is required in SDP but browsers don't use it to convey any useful information.
 function get_fingerprints_bytes(sdp) {
 	const fingerprint_regex = /^a=fingerprint:sha-256 (.+)/gm;
 	
@@ -21,8 +18,8 @@ function get_fingerprints_bytes(sdp) {
 async function mung_sdp({type, sdp}) {
 	// Modify the offer with a signature of our DTLS fingerprint:
 	const fingerprints_bytes = get_fingerprints_bytes(sdp);
-	const signature = await crypto.subtle.sign(P256, privateKey, fingerprints_bytes);
-	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${base64_encode(new Uint8Array(signature))}`);
+	const signature = await our_peerid.sign(fingerprints_bytes);
+	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${signature}`);
 	return {type, sdp};
 }
 
@@ -52,19 +49,35 @@ export class PeerConnection extends RTCPeerConnection {
 			negotiated: true,
 			id: 42
 		});
+		// We use the main network channel to know when a PeerConnection is officially open.
 		this.#hn_dc.onopen = () => {
 			clearTimeout(this.#connecting_timeout);
 			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: this }));
-			routing_table.insert(this);
+			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: {
+				connection: this
+			}}));
 		};
 		this.#hn_dc.onclose = () => {
 			if (this.other_id) {
-				PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: this }));
-				routing_table.delete(this);
+				PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: {
+					connection: this
+				}}));
 			}
+			// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
+			if (this.connectionState !== 'closed') this.abandon();
 		};
-		this.#hn_dc.onmessage = message_handler;
+		this.#hn_dc.onmessage = ({ data }) => {
+			PeerConnection.events.dispatchEvent(new CustomEvent('network-message', { detail: {
+				data,
+				connection: this
+			}}));
+		};
+		this.ondatachannel = ({ channel }) => {
+			PeerConnection.events.dispatchEvent(new CustomEvent('datachannel', { detail: {
+				channel,
+				connection: this
+			}}));
+		};
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
@@ -101,9 +114,6 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 	abandon() {
-		if (this.#hn_dc?.readyState == 'open') {
-			console.warn('Abandoning a peerconnection that is routable:', this);
-		}
 		this.close();
 		PeerConnection.connections.delete(this.other_id);
 		this.ondatachannel = undefined;
@@ -148,7 +158,7 @@ export class PeerConnection extends RTCPeerConnection {
 		if (result == null) throw new Error("Offer didn't include a signature.");
 		const { 1: public_key_str, 2: signature_str } = result;
 		const other_id = await PeerId.from_encoded(public_key_str);
-		const valid = await other_id.verify(base64_decode(signature_str), fingerprints_bytes);
+		const valid = await other_id.verify(signature_str, fingerprints_bytes);
 		if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
 
 		// Check to make sure that we don't switch what peer is on the other side of this connection.

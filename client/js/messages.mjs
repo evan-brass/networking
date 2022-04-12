@@ -96,7 +96,7 @@ routing_table.events.addEventListener('new-sibling', async () => {
 	await announce_self();
 });
 
-export async function message_handler({ data }) {
+async function handle_message({ detail: { data, connection }}) {
 	const {origin, forward_path_parsed, body, back_path_parsed} = await verify_message(data);
 
 	// TODO: Broadcast messages (siblings, and topics) can't be forwarded so make sure that they don't have a forward_path.  We should also check that the back_path is just a single entry and that it came in on a direct connection that we have with the peer.
@@ -182,6 +182,7 @@ export async function message_handler({ data }) {
 	// (We sniff the back_path after handling the message so that we don't send a connect_request after having already sent back a connect message)
 	// sniff_backpath(back_path_parsed);
 }
+PeerConnection.events.addEventListener('network-message', handle_message);
 
 async function sniff_backpath(back_path_parsed,) {
 	for (let i = 0; i < back_path_parsed.length; ++i) {
