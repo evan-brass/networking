@@ -1,42 +1,58 @@
 import { our_peerid } from "./peer-id.mjs";
+import { PeerConnection } from "./peer-connection.mjs";
 
-// s must be greater than 0
+// s must be greater than 0 and is a network wide parameter (Peers need to agree about who their neighbors are)
 const s = 3;
 
-const siblings_above = [];
-const siblings_below = [];
+const above = [];
+const below = [];
 
-export function lin_dst(a, b) {
-	const ret = a - b;
-	return (ret < 0n) ? ret * -1n : ret;
-}
+PeerConnection.events.addEventListener('connected', ({ connection }) => {
+	const list = (connection.other_id.kad_id < connection.other_id.kad_id) ? below : above;
+	// For the below list, ids that are greater are closer to our_peerid.  The oposite is true for the above list.
+	const closer = (list === below) ? (i, t) => i > t : (i, t) => i < t;
+	for (let i = 0; i < above.length; ++i) {
+		const test = above[i];
+		if (!closer(connection.other_id.kad_id, test.other_id.kad_id)) {
+			above.splice(i, 0, connection);
+			if (i < s) {
+				// Claim the connection
+				connection.claim();
+				// Release the old sibling if there was one
+				const old_sibling = list[s];
+				if (old_sibling) old_sibling.release();
+			}
+		}
+	}
+});
+PeerConnection.events.addEventListener('disconected', ({ connection }) => {
+	const list = (connection.other_id.kad_id < our_peerid.kad_id) ? above : below;
+	const i = list.indexOf(connection);
+	list.splice(i, 1);
+	if (i < s) {
+		// The old connection was a sibling so claim the new sibling that replaces it (if there is one).
+		const new_sibling = list[s - 1];
+		if (new_sibling) new_sibling.claim();
+	}
+});
 
-// Check if a key is within our responsible range:
-export function is_responsible(kad_id) {
-	const list = (kad_id < our_peerid.kad_id) ? siblings_below : siblings_above;
-	if (list.length < s) return true;
-	return lin_dst(our_peerid.kad_id, kad_id) < lin_dst(our_peerid.kad_id, list[list.length - 1]);
+// Used for sibling broadcast
+export function* siblings() {
+	for (let i = Math.min(s, below.length) - 1; i >= 0; --i) {
+		yield below[i];
+	}
+	for (let i = 0; i < s && i < above.length; ++i) {
+		yield above[i];
+	}
 }
 
 export function sibling_range() {
-	const sib_belowest = siblings_below[siblings_below.length - 1]?.other_id?.public_key_encoded;
-	const sib_below_count = siblings_below.length;
-	const sib_aboveest = siblings_above[siblings_above.length - 1]?.other_id?.public_key_encoded;
-	const sib_above_count = siblings_above.length;
-	return {sib_aboveest, sib_above_count, sib_belowest, sib_below_count};
+	const high = above[s - 1] ?? 2n ** 256n;
+	const low = below[s - 1] ?? 0;
+	return { high, low };
 }
 
-export function space_available_sibling_list(kad_id) {
-	// Check if we have space in our sibling list
-	const list = (kad_id < our_peerid.kad_id) ? siblings_below : siblings_above;
-	if (list.length < s) return list;
-	if (s > 0 && lin_dst(our_peerid.kad_id, kad_id) < lin_dst(our_peerid.kad_id, list[list.length - 1].other_id.kad_id)) return list;
-}
-
-export function* siblings() {
-	// Iterate over the siblings
-	for (let i = siblings_below.length - 1; i > 0; --i) {
-		yield siblings_below[i];
-	}
-	yield* siblings_above;
+export function is_responsible(kad_id) {
+	const { high, low } = sibling_range();
+	return kad_id <= high && kad_id >= low;
 }

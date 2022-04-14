@@ -1,19 +1,37 @@
 import { PeerConnection } from "./peer-connection.mjs";
 import { our_peerid } from "./peer-id.mjs";
 
+/**
+ * So... If we end up deciding that not all peers need to be part of the DHT, then we probably want that decision to be based on a self-tuning huristic.
+ * Browser peers will likely have high churn so if we detect that the network is suffering under high churn then the browser could switch itself into being a DHT client instead of being a DHT server.
+ * I'm thinking that the default will be for browsers to participate in the DHT until they determine that the DHT doesn't need them (or would benefit from them not participating).
+ * Browsers should participate in the DHT if the DHT is small (there aren't very many nodes) or if the DHT is under excessive load.  I'm not quite sure how to measure the DHT load.  Long query times?
+ * Whatever design decisions we make, we'll need to eventually simulate the network and verify that it performs well under various attack methods.
+ */
+
 const k = 2;
 
 const buckets = [];
 
-export function* lookup(kad_id, constraint) {
-	if (constraint === undefined) {
-		// The default constraint is to lookup peers that are closer (by xor distance) than our_peerid
-		const our_dst = kad_id ^ our_peerid.kad_id;
-		constraint = a => (kad_id ^ a) < our_dst;
-	}
+// Currently we're returning a boolean for could fit, but eventually we will use a better weighting system.  Perhaps we weight new connections based on how far they are from our first unfilled bucket?  I'm not quite sure how the weighting will end up working.
+export function could_fit(peer_id) {
+	const i = bucket_index(peer_id.kad_id);
+	const bucket = buckets[i];
+	return bucket === undefined || bucket.length < k;
+}
+
+// The default constraint on lookups is to only return connections who are closer (by xor distance) than our_peerid
+export function default_constraint(kad_id) {
+	const our_dst = kad_id ^ our_peerid.kad_id;
+	return connection => (kad_id ^ connection.other_id.kad_id) < our_dst;
+}
+export function* lookup(kad_id, constraint = default_constraint(kad_id)) {
 	for (let i = bucket_index(kad_id); i >= 0; --i) {
 		if (buckets[i] === undefined) continue;
-		const items = Array.from(buckets[i]).filter(c => constraint(c.other_id.kad_id));
+		const items = [];
+		for (const conn of buckets[i]) {
+			if (constraint(conn)) items.push(conn);
+		}
 		items.sort((a, b) => {
 			const dst_a = kad_id ^ a.other_id.kad_id;
 			const dst_b = kad_id ^ b.other_id.kad_id;
