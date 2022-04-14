@@ -1,5 +1,4 @@
-import { PeerId, our_peerid } from "./peer-id.mjs";
-import { bucket_index, routing_table } from "./routing-table.mjs";
+import { PeerId, our_peerid } from "./core/peer-id.mjs";
 import { lin_dst } from "./routing-table.mjs";
 import { PeerConnection } from "./webrtc.mjs";
 

@@ -1,3 +1,6 @@
+import { PeerConnection } from "./peer-connection.mjs";
+import { our_peerid } from "./peer-id.mjs";
+
 /**
  * The Rendevous protocol.
  * To join a topic / room, a peer routes a subscribe message to the closest peer to the topic's kad_id.  Peers hold on to that subscription message.  When another subscription message comes in, the first subscription message is source routed to the sender of the second subscription message.  This creates a quite long back_path.  Also, while loops are not allowed in the forward_path, a cycle can exist in the back_path due to this kind of forwarding.
@@ -36,3 +39,6 @@ const rendezvous_table = new Map();
 // topic -> Set<origin>  (We use a set because multiple apps might subscribe to the same topic)
 const topics = new Map();
 
+export function subscribe(topic_kad) {
+	
+}

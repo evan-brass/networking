@@ -1,5 +1,13 @@
-import { iceServers } from "./network-props.mjs";
 import { PeerId, our_peerid } from "./peer-id.mjs";
+
+// TODO: let the user edit their ICE configuration
+const iceServers = [{
+	// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
+	urls: [
+		'stun:stun.l.google.com:19302',
+		'stun:stun1.l.google.com:19302'
+	]
+}];
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
 // s=<base64-public-key>.<base64 sec-1 signature>
@@ -21,6 +29,33 @@ async function mung_sdp({type, sdp}) {
 	const signature = await our_peerid.sign(fingerprints_bytes);
 	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${signature}`);
 	return {type, sdp};
+}
+
+class ConnectedEvent extends CustomEvent {
+	constructor(peer_connection) {
+		super('connected');
+		this.connection = peer_connection;
+	}
+}
+class DisconnectedEvent extends CustomEvent {
+	constructor(peer_connection) {
+		super('disconnected');
+		this.connection = peer_connection;
+	}
+}
+class NetworkMessageEvent extends CustomEvent {
+	constructor(peer_connection, data) {
+		super('network-message');
+		this.connection = peer_connection;
+		this.data = data;
+	}
+}
+class DataChannelEvent extends CustomEvent {
+	constructor(peer_connection, channel) {
+		super('datachannel');
+		this.connection = peer_connection;
+		this.channel = channel;
+	}
 }
 
 /**
@@ -53,30 +88,20 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#hn_dc.onopen = () => {
 			clearTimeout(this.#connecting_timeout);
 			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-			PeerConnection.events.dispatchEvent(new CustomEvent('connected', { detail: {
-				connection: this
-			}}));
+			PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
 		};
 		this.#hn_dc.onclose = () => {
 			if (this.other_id) {
-				PeerConnection.events.dispatchEvent(new CustomEvent('disconnected', { detail: {
-					connection: this
-				}}));
+				PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
 			}
 			// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
 			if (this.connectionState !== 'closed') this.abandon();
 		};
 		this.#hn_dc.onmessage = ({ data }) => {
-			PeerConnection.events.dispatchEvent(new CustomEvent('network-message', { detail: {
-				data,
-				connection: this
-			}}));
+			PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
 		};
 		this.ondatachannel = ({ channel }) => {
-			PeerConnection.events.dispatchEvent(new CustomEvent('datachannel', { detail: {
-				channel,
-				connection: this
-			}}));
+			PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
 		};
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
@@ -119,16 +144,12 @@ export class PeerConnection extends RTCPeerConnection {
 		this.ondatachannel = undefined;
 		this.#hn_dc.onmessage = undefined;
 	}
-	#ice_done() {
-		return new Promise(res => {
-			this.onicegatheringstatechange = () => {
-				if (this.iceGatheringState == 'complete') {
-					res();
-					this.onicegatheringstatechange = undefined;
-				}
-			};
-			this.onicegatheringstatechange();
-		});
+	async #ice_done() {
+		while (this.iceGatheringState != 'complete') {
+			await new Promise(res => {
+				this.addEventListener('icegatheringstatechange', res, { once: true });
+			});
+		}
 	}
 	// Should really only be used by bootstrap which needs to create peer connections without an other_id
 	async negotiate({ type, sdp } = {}) {
@@ -144,8 +165,8 @@ export class PeerConnection extends RTCPeerConnection {
 
 			await this.setLocalDescription();
 			await this.#ice_done();
+
 			this.#making_offer = false;
-			if (this.localDescription == null) debugger;
 			return mung_sdp(this.localDescription);
 		}
 		// We're creating an answer.
@@ -187,6 +208,7 @@ export class PeerConnection extends RTCPeerConnection {
 			}
 		}
 	}
+
 	static async handle_connect(origin, description) {
 		// Find the peerconnection that has origin and try to negotiate it:
 		const existing = PeerConnection.connections.get(origin);
@@ -199,5 +221,47 @@ export class PeerConnection extends RTCPeerConnection {
 			PeerConnection.connections.set(origin, pc);
 			return await pc.negotiate(description);
 		}
+	}
+
+	// Routing (Routing along a path doesn't require any tables - we just route across all connections):
+	async source_route(path, msg) {
+		const body = JSON.stringify(msg);
+		const body_sig = await our_peerid.sign(body);
+		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
+		const forward_sig = await our_peerid.sign(forward_path);
+
+		return await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path: []});
+	}
+	// source_route_data is also used for forwarding
+	async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path}) {
+		// Check for loops in the path (TODO: simplify around the loops?):
+		const loop_check = new Set();
+		for (const pid of path) {
+			if (loop_check.has(pid)) throw new Error("Found a routing loop in the path");
+			loop_check.add(pid);
+		}
+		
+		for (const pid of path) {
+			const con = PeerConnection.connections.get(pid);
+			if (con !== undefined && con.is_open()) {
+				// Only include the forward path if we aren't sending directly to the intended target
+				if (path[0] === con.other_id) {
+					forward_path = undefined;
+					forward_sig = undefined;
+				}
+				const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
+				const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
+	
+				con.send(JSON.stringify({
+					origin: our_peerid.public_key_encoded,
+					forward_path, forward_sig,
+					body, body_sig,
+					back_path: new_back_path
+				}));
+				return;
+			}
+		}
+		// TODO: handle broken paths by sending back a broken_path message instead.
+		throw new Error('Routing Failed: Path');
 	}
 }

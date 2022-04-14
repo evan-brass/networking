@@ -1,4 +1,4 @@
-import { PeerConnection } from "./webrtc.mjs";
+import { PeerConnection } from "./peer-connection.mjs";
 
 
 // Random bytestring of length 20 (Used by webtorrent a lot):
@@ -39,7 +39,7 @@ async function get_ws(tracker) {
 							event: 'completed', downloaded: 600, left: 0, uploaded: 0
 						}));
 					}
-				}, 30 * 1000));
+				}, msg.interval * 1000));
 			}
 			if (msg.offer) {
 				const pc = new PeerConnection();
