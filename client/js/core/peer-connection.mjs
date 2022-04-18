@@ -113,6 +113,7 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	#claimed_timeout_func() {
 		if (this.#claimed == 0) {
+			debugger;
 			this.abandon();
 		}
 		this.#claimed_timeout = false;
@@ -223,22 +224,31 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 
-	// Routing (Routing along a path doesn't require any tables - we just route across all connections):
-	async source_route(path, msg) {
+	// Source route a message along a designated path.
+	static async source_route(path, msg) {
+		// TODO: check for loops and cut them out.
 		const body = JSON.stringify(msg);
 		const body_sig = await our_peerid.sign(body);
+		const back_path = [];
 		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
 		const forward_sig = await our_peerid.sign(forward_path);
-
-		return await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path: []});
+		console.log('send', msg);
+		await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed: []});
 	}
-	// source_route_data is also used for forwarding
-	async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path}) {
-		// Check for loops in the path (TODO: simplify around the loops?):
-		const loop_check = new Set();
-		for (const pid of path) {
-			if (loop_check.has(pid)) throw new Error("Found a routing loop in the path");
-			loop_check.add(pid);
+	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {
+		// Check for routing loops:
+		const loop_check = new Map();
+		for (let i = 0; i < path.length; ++i) {
+			const pid = path[i];
+			const first_seen = loop_check.get(pid);
+			if (first_seen !== undefined) {
+				// Snip the loop
+				console.log("snipped a loop while source routing: ", path, first_seen, i - first_seen);
+				path.splice(first_seen, i - first_seen);
+				i = first_seen + 1;
+			} else {
+				loop_check.set(pid, i);
+			}
 		}
 		
 		for (const pid of path) {
@@ -251,9 +261,8 @@ export class PeerConnection extends RTCPeerConnection {
 				}
 				const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
 				const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
-	
+
 				con.send(JSON.stringify({
-					origin: our_peerid.public_key_encoded,
 					forward_path, forward_sig,
 					body, body_sig,
 					back_path: new_back_path
@@ -261,7 +270,14 @@ export class PeerConnection extends RTCPeerConnection {
 				return;
 			}
 		}
-		// TODO: handle broken paths by sending back a broken_path message instead.
-		throw new Error('Routing Failed: Path');
+		const is_broken_path = JSON.parse(body).type == 'broken_path';
+		if (back_path_parsed.length > 0 && !is_broken_path) {
+			await forward(back_path_parsed, {
+				type: 'broken_path',
+				expiration: get_expiration(),
+				broken_forward_path: forward_path,
+				broken_forward_sig: forward_sig
+			});
+		}
 	}
 }

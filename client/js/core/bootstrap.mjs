@@ -31,6 +31,7 @@ async function get_ws(tracker) {
 				if (old_interval) clearInterval(old_interval);
 
 				intervals.set(info_hash, setInterval(() => {
+					console.log('tracker_interval ran');
 					if (ws.readyState == ws.OPEN) {
 						ws.send(JSON.stringify({
 							action: 'announce',
@@ -39,7 +40,7 @@ async function get_ws(tracker) {
 							event: 'completed', downloaded: 600, left: 0, uploaded: 0
 						}));
 					}
-				}, msg.interval * 1000));
+				}, 30000)); // I really don't know why using the actual interval that the tracker sends us doesn't work, but oh well.
 			}
 			if (msg.offer) {
 				const pc = new PeerConnection();
@@ -75,6 +76,14 @@ PeerConnection.events.addEventListener('connected', () => {
 });
 
 export async function bootstrap_tracker(info_hash, tracker) {
+	// Soo... Even closed RTCPeerConnections count against our limit (in chrome the limit is 500 connections)
+	// So we have to cleanup the peer_conns map of closed connections as the first thing before we start trying to create more:
+	for (const [key, conn] of peer_conns.entries()) {
+		if (conn.connectionState == 'closed') {
+			peer_conns.delete(key);
+		}
+	}
+
 	const ws = await get_ws(tracker);
 
 	const offer_id = r20bs();

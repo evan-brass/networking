@@ -1,6 +1,7 @@
 import { PeerId, our_peerid } from "./core/peer-id.mjs";
-import { lin_dst } from "./routing-table.mjs";
-import { PeerConnection } from "./webrtc.mjs";
+import { PeerConnection } from "./core/peer-connection.mjs";
+import { sibling_range } from "./core/siblings.mjs";
+import { bucket_index } from "./core/kbuckets.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -29,18 +30,21 @@ function draw_network() {
 	ctx.stroke();
 
 	// Draw out all of the peer_ids that we've ever seen
+	const { high, low } = sibling_range();
 	for (const wr of PeerId.peer_ids.values()) {
 		const pid = wr.deref();
 		if (pid == undefined) continue;
 		const connection = PeerConnection.connections.get(pid);
-		const is_sibling = routing_table.is_sibling(pid.kad_id);
+		const is_sibling = pid.kad_id >= low && pid.kad_id <= high;
 		const bi = bucket_index(pid.kad_id);
 		if (pid == our_peerid) {
 			ctx.fillStyle = 'red';
-		} else if (is_sibling) {
-			ctx.fillStyle = 'orange';
-		} else if (connection) {
-			ctx.fillStyle = 'blue';
+		} else if (connection && connection.is_open()) {
+			if (is_sibling) {
+				ctx.fillStyle = 'orange';
+			} else {
+				ctx.fillStyle = 'blue';
+			}
 		} else {
 			ctx.fillStyle = 'black';
 		}

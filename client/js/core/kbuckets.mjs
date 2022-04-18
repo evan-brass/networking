@@ -1,5 +1,6 @@
 import { PeerConnection } from "./peer-connection.mjs";
 import { our_peerid } from "./peer-id.mjs";
+import { messages } from "./messages.mjs";
 
 /**
  * So... If we end up deciding that not all peers need to be part of the DHT, then we probably want that decision to be based on a self-tuning huristic.
@@ -19,77 +20,7 @@ export function could_fit(peer_id) {
 	const bucket = buckets[i];
 	return bucket === undefined || bucket.length < k;
 }
-
-// The default constraint on lookups is to only return connections who are closer (by xor distance) than our_peerid
-export function default_constraint(kad_id) {
-	const our_dst = kad_id ^ our_peerid.kad_id;
-	return connection => (kad_id ^ connection.other_id.kad_id) < our_dst;
-}
-export function* lookup(kad_id, constraint = default_constraint(kad_id)) {
-	for (let i = bucket_index(kad_id); i >= 0; --i) {
-		if (buckets[i] === undefined) continue;
-		const items = [];
-		for (const conn of buckets[i]) {
-			if (constraint(conn)) items.push(conn);
-		}
-		items.sort((a, b) => {
-			const dst_a = kad_id ^ a.other_id.kad_id;
-			const dst_b = kad_id ^ b.other_id.kad_id;
-			return (dst_a < dst_b) ? -1 : 1;
-		});
-		yield* items;
-	}
-}
-
-PeerConnection.events.addEventListener('connected', ({ connection }) => {
-	const i = bucket_index(connection.other_id.kad_id);
-	if (buckets[i] === undefined) {
-		buckets[i] = [];
-	}
-	const bucket = buckets[i];
-	bucket.push(connection);
-	// We claim the first k entries in the bucket.  We still store the rest of the connections to automatically back-fill when a connection closes.
-	if (bucket.length <= k) connection.claim();
-});
-PeerConnection.events.addEventListener('disconected', ({ connection }) => {
-	// We don't need to release connections from the disconnect handler, because the connections are already closed.
-	const i = bucket_index(connection.other_id.kad_id);
-	const bucket = buckets[i];
-	if (bucket !== undefined) {
-		const index = bucket.indexOf(connection);
-		if (index !== -1) {
-			if (index < k) {
-				// This connection was claimed, so claim the connection that replaces it (If there is a replacement)
-				const unclaimed = bucket[k];
-				if (unclaimed !== undefined) unclaimed.claim();
-			}
-			bucket.splice(index, 1); 
-		}
-	}
-});
-
-// export async function refresh_bucket() {
-// 	// Find the first bucket that has space:
-// 	let i;
-// 	for (i = 0; i < buckets.length; ++i) {
-// 		const bucket = buckets[i];
-// 		if (bucket === undefined || bucket.size < k) {
-// 			break;
-// 		}
-// 	}
-// 	// If our buckets aren't full, then create a connection request to fill that bucket
-// 	if (i < buckets.length) {
-// 		const target = random_kad_id(i);
-// 		// TODO: Store the body_sig into the waiting_connects table.
-// 		await routing_table.kad_route(target, {
-// 			type: 'request_connect',
-// 			expiration: get_expiration(),
-// 			target: target.toString(16),
-// 			bucket: i
-// 		});
-// 	}
-// }
-function bucket_index(kad_id, b = our_peerid.kad_id) {
+export function bucket_index(kad_id, b = our_peerid.kad_id) {
 	// if (kad_id == our_peerid.kad_id) throw new Error("There's no bucket for our own peer_id.");
 	let t = kad_id ^ b;
 	if (t == 0n) return 256;
@@ -118,3 +49,89 @@ export function random_kad_id(bucket) {
 
 	return BigInt.asUintN(256, prefix | rand);
 }
+
+// The default constraint on lookups is to only return connections who are closer (by xor distance) than our_peerid
+export function default_constraint(kad_id) {
+	const our_dst = kad_id ^ our_peerid.kad_id;
+	return connection => (kad_id ^ connection.other_id.kad_id) < our_dst;
+}
+export function* lookup(kad_id, constraint = default_constraint(kad_id)) {
+	for (let i = bucket_index(kad_id); i >= 0; --i) {
+		if (buckets[i] === undefined) continue;
+		const items = [];
+		for (const conn of buckets[i]) {
+			if (constraint(conn)) items.push(conn);
+		}
+		items.sort((a, b) => {
+			const dst_a = kad_id ^ a.other_id.kad_id;
+			const dst_b = kad_id ^ b.other_id.kad_id;
+			return (dst_a < dst_b) ? -1 : 1;
+		});
+		yield* items;
+	}
+}
+
+// Insert / remove connections from the kbuckets table
+PeerConnection.events.addEventListener('connected', ({ connection }) => {
+	const i = bucket_index(connection.other_id.kad_id);
+	if (buckets[i] === undefined) {
+		buckets[i] = [];
+	}
+	const bucket = buckets[i];
+	bucket.push(connection);
+	// We claim the first k entries in the bucket.  We still store the rest of the connections to automatically back-fill when a connection closes.
+	if (bucket.length <= k) connection.claim();
+});
+PeerConnection.events.addEventListener('disconected', ({ connection }) => {
+	// We don't need to release connections from the disconnect handler, because the connections are already closed.
+	const i = bucket_index(connection.other_id.kad_id);
+	const bucket = buckets[i];
+	if (bucket !== undefined) {
+		const index = bucket.indexOf(connection);
+		if (index !== -1) {
+			if (index < k) {
+				// This connection was claimed, so claim the connection that replaces it (If there is a replacement)
+				const unclaimed = bucket[k];
+				if (unclaimed !== undefined) unclaimed.claim();
+			}
+			bucket.splice(index, 1); 
+		}
+	}
+});
+
+// Listen for incoming request_connect messages with a bits field
+messages.addEventListener('request_connect', async e => {
+	const { msg, origin } = e;
+	if (msg.bits !== undefined) {
+		// TODO: check if we would fit inside the 
+		e.stopImmediatePropagation();
+		// TODO: handle the request_connect.
+	}
+});
+
+// Route routable messages which end up not being handled closer to their intended destination
+ messages.addEventListener('route', async e => {
+
+ });
+
+// export async function refresh_bucket() {
+// 	// Find the first bucket that has space:
+// 	let i;
+// 	for (i = 0; i < buckets.length; ++i) {
+// 		const bucket = buckets[i];
+// 		if (bucket === undefined || bucket.size < k) {
+// 			break;
+// 		}
+// 	}
+// 	// If our buckets aren't full, then create a connection request to fill that bucket
+// 	if (i < buckets.length) {
+// 		const target = random_kad_id(i);
+// 		// TODO: Store the body_sig into the waiting_connects table.
+// 		await routing_table.kad_route(target, {
+// 			type: 'request_connect',
+// 			expiration: get_expiration(),
+// 			target: target.toString(16),
+// 			bucket: i
+// 		});
+// 	}
+// }

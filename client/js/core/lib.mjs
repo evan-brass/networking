@@ -27,3 +27,16 @@ export const P256 = {
 	namedCurve: 'P-256',
 	hash: 'SHA-256'
 };
+
+// Expiration creation / checking
+export function get_expiration(future = 5 /* min. in the future that the expiration will expire. */) {
+	// Timestamp for right now in seconds.
+	return Math.trunc(Date.now() / 1000 + future * 60).toString(16);
+}
+export function check_expiration(str) {
+	if (typeof str != 'string') throw new Error('Missing expiration');
+	const expiration = BigInt('0x' + str);
+	const now = Date.now() / 1000;
+	if (expiration < now) throw new Error('Message has expired.');
+	// TODO: check if the expiration is too far out.  (what's a reasonable maximum expiration for messages? 10min? 30min?)
+}
