@@ -2,8 +2,10 @@ import { our_peerid, PeerId } from "./peer-id.mjs";
 import { PeerConnection } from './peer-connection.mjs';
 import { check_expiration } from "./lib.mjs";
 
-const unroutable = ['topic_broadcast'];
-const fwd_only = ['siblings', 'not_siblings', 'connect'];
+// Message that can only be sent directly from peer to peer
+const routable = ['kbucket'];
+// Messages which can only be source_routed (no kademlia routing)
+const forwardable = ['siblings', 'not_siblings', 'connect', 'route_ack'];
 
 // Messages that have been verified will be sent as events on this object.
 // Additionally, we have the special 'route' message
@@ -11,7 +13,7 @@ export const messages = new EventTarget();
 
 class MessageEvent extends CustomEvent {
 	constructor(props = {}, type = props.msg?.type) {
-		super(type);
+		super(type, { cancelable: true });
 		for (const key in props) {
 			Object.defineProperty(this, key, {
 				value: props[key],
@@ -44,7 +46,7 @@ PeerConnection.events.addEventListener('network-message', async ({ connection, d
 	const not_handled = messages.dispatchEvent(new MessageEvent(parts));
 
 	// If the event does not have its propagation stopped, then route the message to a closer peer
-	if (not_handled && !unroutable.includes(parts.body.type)) {
+	if (not_handled && routable.includes(parts.msg.type)) {
 		messages.dispatchEvent(new MessageEvent(parts, 'route'));
 	}
 });
@@ -94,18 +96,12 @@ export async function verify_message(data, last_pid = our_peerid) {
 
 	// Routable messages need an expiration so that they can't be replayed.  Unroutable messages don't need an expiration because we the message comes directly from the sender.
 	let target;
-	if (!unroutable.includes(msg.type)) {
+	if (routable.includes(msg.type)) {
+		target = BigInt('0x' + msg.target);
 		check_expiration(msg.expiration);
-
-		if (!fwd_only.includes(msg.type)) {
-			if (typeof msg.target != 'string') {
-				throw new Error('Routable messages need a target which is the destination that we are trying to route toward.');
-			} else {
-				target = BigInt('0x' + msg.target);
-			}
-		}
+	} else if (forwardable.includes(msg.type)) {
+		check_expiration(msg.expiration);
 	} else {
-		if (forward_path_parsed) throw new Error("Can't have a forward path on an unroutable message");
 		if (back_path_parsed.length != 1) throw new Error("Unroutable message was not sent directly to use.");
 	}
 

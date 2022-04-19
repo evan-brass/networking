@@ -1,4 +1,5 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
+import { get_expiration } from "./lib.mjs";
 
 // TODO: let the user edit their ICE configuration
 const iceServers = [{
@@ -80,32 +81,59 @@ export class PeerConnection extends RTCPeerConnection {
 
 		// TODO: Add a sub-protocol?
 		// Create the main hyperspace data channel which carries routing and signaling traffic.
-		this.#hn_dc = this.createDataChannel('hyperspace-network', {
-			negotiated: true,
-			id: 42
-		});
-		// We use the main network channel to know when a PeerConnection is officially open.
-		this.#hn_dc.onopen = () => {
-			clearTimeout(this.#connecting_timeout);
-			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-			PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
-		};
-		this.#hn_dc.onclose = () => {
-			if (this.other_id) {
-				PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
+		const data_channel = this.createDataChannel('hyperspace-network');
+		data_channel.onopen = () => {
+			if (data_channel.id % 2 !== 0) {
+				// Even though both peers open a hyperspace-network data channel, we only keep the one with an even id.
+				data_channel.close();
+			} else {
+				this.#hn_dc = data_channel;
+				this.#hn_dc.onclose = () => {
+					if (this.other_id) {
+						PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
+					}
+					// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
+					if (this.connectionState !== 'closed') this.abandon();
+				};
+				this.#hn_dc.onmessage = ({ data }) => {
+					PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
+				};
+				clearTimeout(this.#connecting_timeout);
+				this.#connecting_timeout = undefined;
+				this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
+				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
 			}
-			// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
-			if (this.connectionState !== 'closed') this.abandon();
-		};
-		this.#hn_dc.onmessage = ({ data }) => {
-			PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
 		};
 		this.ondatachannel = ({ channel }) => {
-			PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
+			if (channel.label === 'hyperspace-network') {
+				if (channel.id % 2 !== 0) {
+					channel.close();
+				} else {
+					this.#hn_dc = channel;
+					this.#hn_dc.onclose = () => {
+						if (this.other_id) {
+							PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
+						}
+						// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
+						if (this.connectionState !== 'closed') this.abandon();
+					};
+					this.#hn_dc.onmessage = ({ data }) => {
+						PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
+					};
+					clearTimeout(this.#connecting_timeout);
+					this.#connecting_timeout = undefined;
+					this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
+					PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
+				}
+			} else {
+				PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
+			}
 		};
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
-		this.#connecting_timeout = setTimeout(this.abandon.bind(this), 10000);
+		this.#connecting_timeout = setTimeout(() => {
+			this.abandon();
+		}, 10000);
 		// Close connections that get disconnected or fail (alternatively we could restartice and then timeout);
 		this.onconnectionstatechange = () => {
 			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.abandon();
@@ -113,7 +141,6 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	#claimed_timeout_func() {
 		if (this.#claimed == 0) {
-			debugger;
 			this.abandon();
 		}
 		this.#claimed_timeout = false;
@@ -130,7 +157,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 	is_open() {
-		return this.#hn_dc.readyState == 'open';
+		return this.#hn_dc?.readyState == 'open';
 	}
 	send(data) {
 		if (this.is_open()) {
@@ -143,7 +170,9 @@ export class PeerConnection extends RTCPeerConnection {
 		this.close();
 		PeerConnection.connections.delete(this.other_id);
 		this.ondatachannel = undefined;
-		this.#hn_dc.onmessage = undefined;
+		if (this.#hn_dc) {
+			this.#hn_dc.onmessage = undefined;
+		}
 	}
 	async #ice_done() {
 		while (this.iceGatheringState != 'complete') {
@@ -272,7 +301,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 		const is_broken_path = JSON.parse(body).type == 'broken_path';
 		if (back_path_parsed.length > 0 && !is_broken_path) {
-			await forward(back_path_parsed, {
+			await PeerConnection.source_route(back_path_parsed, {
 				type: 'broken_path',
 				expiration: get_expiration(),
 				broken_forward_path: forward_path,
@@ -281,3 +310,5 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 }
+// PeerConnection.events.addEventListener('connected', console.log);
+// PeerConnection.events.addEventListener('disconnected', console.log);

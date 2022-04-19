@@ -2,7 +2,7 @@ import { bootstrap_tracker } from "./core/bootstrap.mjs";
 import { PeerId } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
 import "./core/messages.mjs";
-import "./core/kbuckets.mjs";
+import { refresh_bucket } from "./core/kbuckets.mjs";
 import { announce_self } from "./core/siblings.mjs";
 
 function timeout(t = 10000) {
@@ -16,7 +16,7 @@ async function heartbeat() {
 	} else {
 		await announce_self();
 
-		// await refresh_bucket();
+		await refresh_bucket();
 	}
 
 	// TODO: refresh a stale bucket if needed.

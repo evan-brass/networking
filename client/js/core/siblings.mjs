@@ -86,7 +86,7 @@ PeerConnection.events.addEventListener('connected', ({ connection }) => {
 		}
 	}
 });
-PeerConnection.events.addEventListener('disconected', ({ connection }) => {
+PeerConnection.events.addEventListener('disconnected', ({ connection }) => {
 	const list = (connection.other_id.kad_id < our_peerid.kad_id) ? above : below;
 	const i = list.indexOf(connection);
 	list.splice(i, 1);

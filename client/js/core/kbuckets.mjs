@@ -1,6 +1,8 @@
 import { PeerConnection } from "./peer-connection.mjs";
 import { our_peerid } from "./peer-id.mjs";
 import { messages } from "./messages.mjs";
+import { connect } from "./connect.mjs";
+import { get_expiration } from "./lib.mjs";
 
 /**
  * So... If we end up deciding that not all peers need to be part of the DHT, then we probably want that decision to be based on a self-tuning huristic.
@@ -82,7 +84,7 @@ PeerConnection.events.addEventListener('connected', ({ connection }) => {
 	// We claim the first k entries in the bucket.  We still store the rest of the connections to automatically back-fill when a connection closes.
 	if (bucket.length <= k) connection.claim();
 });
-PeerConnection.events.addEventListener('disconected', ({ connection }) => {
+PeerConnection.events.addEventListener('disconnected', ({ connection }) => {
 	// We don't need to release connections from the disconnect handler, because the connections are already closed.
 	const i = bucket_index(connection.other_id.kad_id);
 	const bucket = buckets[i];
@@ -101,37 +103,81 @@ PeerConnection.events.addEventListener('disconected', ({ connection }) => {
 
 // Listen for incoming request_connect messages with a bits field
 messages.addEventListener('request_connect', async e => {
-	const { msg, origin } = e;
+	const { msg, origin, back_path_parsed } = e;
 	if (msg.bits !== undefined) {
-		// TODO: check if we would fit inside the 
-		e.stopImmediatePropagation();
-		// TODO: handle the request_connect.
+		// TODO: check if we would fit inside the requester's kbucket and check if we have space in our kbucket for the requestor.
+		if (could_fit(origin) && bucket_index(our_peerid.kad_id, origin.kad_id) === msg.bits) {
+			e.stopImmediatePropagation();
+			// Connect to the peer:
+			await connect(back_path_parsed);
+		}
 	}
 });
 
+// Route a message as close to a target as possible.
+const closer_cnt = 5;
+export async function route(target, msg) {
+	const body = JSON.stringify(msg);
+	const body_sig = await our_peerid.sign(body);
+	const back_path = [];
+	await route_data(target, {body, body_sig, back_path});
+}
+async function route_data(target, {body, body_sig, back_path, back_path_parsed}) {
+	const closer = [];
+	for (const conn of lookup(target)) {
+		closer.push(conn);
+		if (closer.length >= closer_cnt) break;
+	}
+	const closest = closer[0];
+	if (closest !== undefined) {
+		// Pass the message onward toward the target
+		const back_path_sig = await our_peerid.sign(closest.other_id.public_key_encoded + body_sig);
+		await closest.send(JSON.stringify({
+			body, body_sig,
+			back_path: [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path]
+		}));
+	}
+	if (back_path.length > 0) {
+		// TODO: send a routing acknowledgement.
+		await PeerConnection.source_route(back_path_parsed, {
+			type: 'route_ack',
+			expiration: get_expiration(),
+			closer: closer.map(c => c.other_id.public_key_encoded),
+			acknowledging: body_sig
+		});
+	}
+}
+
 // Route routable messages which end up not being handled closer to their intended destination
- messages.addEventListener('route', async e => {
+messages.addEventListener('route', async e => {
+	const { msg } = e;
+	if (msg.target) {
+		e.stopImmediatePropagation();
 
- });
+		const target = BigInt('0x' + msg.target);
 
-// export async function refresh_bucket() {
-// 	// Find the first bucket that has space:
-// 	let i;
-// 	for (i = 0; i < buckets.length; ++i) {
-// 		const bucket = buckets[i];
-// 		if (bucket === undefined || bucket.size < k) {
-// 			break;
-// 		}
-// 	}
-// 	// If our buckets aren't full, then create a connection request to fill that bucket
-// 	if (i < buckets.length) {
-// 		const target = random_kad_id(i);
-// 		// TODO: Store the body_sig into the waiting_connects table.
-// 		await routing_table.kad_route(target, {
-// 			type: 'request_connect',
-// 			expiration: get_expiration(),
-// 			target: target.toString(16),
-// 			bucket: i
-// 		});
-// 	}
-// }
+		await route_data(target, e);
+	}
+});
+
+export async function refresh_bucket() {
+	// Find the first bucket that has space:
+	let i;
+	for (i = 0; i < buckets.length; ++i) {
+		const bucket = buckets[i];
+		if (bucket === undefined || bucket.size < k) {
+			break;
+		}
+	}
+	// If our buckets aren't full, then create a connection request to fill that bucket
+	if (i < buckets.length) {
+		const target = random_kad_id(i);
+		// TODO: Store the body_sig into the waiting_connects table.
+		await route(target, {
+			type: 'request_connect',
+			expiration: get_expiration(),
+			target: target.toString(16),
+			bucket: i
+		});
+	}
+}
