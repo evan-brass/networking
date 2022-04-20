@@ -10,28 +10,6 @@ const iceServers = [{
 	]
 }];
 
-// We use a special SDP attribute to identify the rtcpeerconnection:
-// s=<base64-public-key>.<base64 sec-1 signature>
-// Technically, the s field is the session description which is required in SDP but browsers don't use it to convey any useful information.
-function get_fingerprints_bytes(sdp) {
-	const fingerprint_regex = /^a=fingerprint:sha-256 (.+)/gm;
-	
-	const fingerprints = [];
-	let result;
-	while ((result = fingerprint_regex.exec(sdp)) !== null) {
-		const { 0: str } = result;
-		fingerprints.push(...str.split(':').map(b => Number.parseInt(b, 16)));
-	}
-	return new Uint8Array(fingerprints);
-}
-async function mung_sdp({type, sdp}) {
-	// Modify the offer with a signature of our DTLS fingerprint:
-	const fingerprints_bytes = get_fingerprints_bytes(sdp);
-	const signature = await our_peerid.sign(fingerprints_bytes);
-	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${signature}`);
-	return {type, sdp};
-}
-
 class ConnectedEvent extends CustomEvent {
 	constructor(peer_connection) {
 		super('connected');
@@ -67,68 +45,28 @@ export class PeerConnection extends RTCPeerConnection {
 	static connections = new Map();
 	// Events announces when our peer connections open or close.
 	static events = new EventTarget();
-	#hn_dc = null;
-	#connecting_timeout = false;
+	// Label -> RTCDataChannel
+	data_channels = new Map();
 	#making_offer = false;
 	#claimed = 0;
+
+	#connecting_timeout = false;
 	#claimed_timeout = false;
-	constructor() {
-		super({
-			bundlePolicy: "max-bundle", // Bundling is supported by browsers, just not voip-phones and such.
-			iceCandidatePoolSize: 3,
-			iceServers
-		});
+	constructor(other_id) {
+		super({ iceServers });
+
+		this.other_id = other_id;
+		if (this.other_id !== undefined) {
+			// TODO: setup automatic renegotiation / ice signaling
+			PeerConnection.connections.set(origin, this);
+
+		}
 
 		// TODO: Add a sub-protocol?
 		// Create the main hyperspace data channel which carries routing and signaling traffic.
-		const data_channel = this.createDataChannel('hyperspace-network');
-		data_channel.onopen = () => {
-			if (data_channel.id % 2 !== 0) {
-				// Even though both peers open a hyperspace-network data channel, we only keep the one with an even id.
-				data_channel.close();
-			} else {
-				this.#hn_dc = data_channel;
-				this.#hn_dc.onclose = () => {
-					if (this.other_id) {
-						PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
-					}
-					// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
-					if (this.connectionState !== 'closed') this.abandon();
-				};
-				this.#hn_dc.onmessage = ({ data }) => {
-					PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
-				};
-				clearTimeout(this.#connecting_timeout);
-				this.#connecting_timeout = undefined;
-				this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
-			}
-		};
-		this.ondatachannel = ({ channel }) => {
-			if (channel.label === 'hyperspace-network') {
-				if (channel.id % 2 !== 0) {
-					channel.close();
-				} else {
-					this.#hn_dc = channel;
-					this.#hn_dc.onclose = () => {
-						if (this.other_id) {
-							PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
-						}
-						// Closing the hyperspace-network data channel closes the connection.  (in the future this might not always be true?)
-						if (this.connectionState !== 'closed') this.abandon();
-					};
-					this.#hn_dc.onmessage = ({ data }) => {
-						PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
-					};
-					clearTimeout(this.#connecting_timeout);
-					this.#connecting_timeout = undefined;
-					this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-					PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
-				}
-			} else {
-				PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
-			}
-		};
+		// This channel also forces the rtcpeerconnection to create an sctp transport so that we have something to negotiate around.
+		this.#channel({ channel: this.createDataChannel('hyperspace-network') });
+		this.ondatachannel = this.#channel;
 
 		// Set a timeout so that we don't get a peer connection that lives in new forever.
 		this.#connecting_timeout = setTimeout(() => {
@@ -139,6 +77,56 @@ export class PeerConnection extends RTCPeerConnection {
 			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.abandon();
 		};
 	}
+	#channel({ channel }) {
+		if (channel.readyState == 'open') {
+			this.#channel_open({ target: channel });
+		} else if (channel.readyState == 'closed') {
+			this.#channel_close({ target: channel });
+		} else {
+			channel.onopen = this.#channel_open.bind(this);
+			channel.onclose = this.#channel_close.bind(this);
+		}
+		channel.onerror = console.error;
+	}
+	#channel_open({ target: channel }) {
+		const existing = this.data_channels.get(channel.label);
+		// Only keep one of each datachannel:
+		if (channel.label == 'hyperspace-network') {
+			channel.onmessage = this.#network_msg.bind(this);
+			if (this.#connecting_timeout !== undefined) {
+				clearTimeout(this.#connecting_timeout);
+				this.#connecting_timeout = undefined;
+			}
+		} else {
+			PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
+		}
+		if (existing) {
+			if (existing.id < channel.id) {
+				this.data_channels.set(channel.label, channel);
+				existing.close();
+			} else {
+				channel.close();
+			}
+		} else {
+			this.data_channels.set(channel.label, channel);
+			if (channel.label == 'hyperspace-network') {
+				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
+			}
+		}
+	}
+	#channel_close({ target: channel }) {
+		const existing = this.data_channels.get(channel.label);
+		if (existing === channel) {
+			this.data_channels.delete(channel.label);
+			if (channel.label == 'hyperspace-network') {
+				PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
+			}
+		}
+	}
+	#network_msg({ data }) {
+		PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
+	}
+
 	#claimed_timeout_func() {
 		if (this.#claimed == 0) {
 			this.abandon();
@@ -157,11 +145,13 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 	is_open() {
-		return this.#hn_dc?.readyState == 'open';
+		const nc = this.data_channels.get('hyperspace-network');
+		return nc?.readyState == 'open';
 	}
 	send(data) {
-		if (this.is_open()) {
-			this.#hn_dc.send(data);
+		const nc = this.data_channels.get('hyperspace-network');
+		if (nc?.readyState == 'open') {
+			nc.send(data);
 		} else {
 			throw new Error("The datachannel for this peer connection is not in an open readyState.");
 		}
@@ -169,102 +159,42 @@ export class PeerConnection extends RTCPeerConnection {
 	abandon() {
 		this.close();
 		PeerConnection.connections.delete(this.other_id);
-		this.ondatachannel = undefined;
-		if (this.#hn_dc) {
-			this.#hn_dc.onmessage = undefined;
+		if (this.other_id) {
+			PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
 		}
 	}
-	async #ice_done() {
-		while (this.iceGatheringState != 'complete') {
-			await new Promise(res => {
-				this.addEventListener('icegatheringstatechange', res, { once: true });
-			});
-		}
-	}
-	// Should really only be used by bootstrap which needs to create peer connections without an other_id
-	async negotiate({ type, sdp } = {}) {
-		// Ignore any changes if the peer connection is closed.
-		if (this.signalingState == 'closed') return;
 
-		if (type === undefined) {
-			// Skip trying to create an offer if we're already connected to this peer.
-			if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') return;
-			
-			// Negotiate will be called without a description when we are initiating a connection to another peer, or when we are generating offers for webtorrent trackers.
-			this.#making_offer = true;
+	static handle_connect(origin, { ice, sdp }) {
+		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
+		if (sdp) {
+			try {
+				const offer_collision = (sdp.type == 'offer') && (pc.making_offer || pc.signalingState != 'stable');
+				const ignore_offer = !origin.polite() && offer_collision;
 
-			await this.setLocalDescription();
-			await this.#ice_done();
+				if (ignore_offer) return;
 
-			this.#making_offer = false;
-			return mung_sdp(this.localDescription);
-		}
-		// We're creating an answer.
-		// Get the DTLS fingerprint(s) from the sdp (In our case, there should always just be a single fingerprint, but just in case...)
-		const fingerprints_bytes = get_fingerprints_bytes(sdp);
-
-		// Get the peer-id and signature from the sdp
-		const sig_regex = /^s=([^\.\s]+)\.([^\.\s]+)/gm;
-		const result = sig_regex.exec(sdp);
-		if (result == null) throw new Error("Offer didn't include a signature.");
-		const { 1: public_key_str, 2: signature_str } = result;
-		const other_id = await PeerId.from_encoded(public_key_str);
-		const valid = await other_id.verify(signature_str, fingerprints_bytes);
-		if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
-
-		// Check to make sure that we don't switch what peer is on the other side of this connection.
-		if (other_id == our_peerid || (this.other_id && this.other_id !== other_id)) {
-			throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
-		}
-		const existing = PeerConnection.connections.get(other_id)
-		if (existing === undefined) {
-			PeerConnection.connections.set(other_id, this);
-			this.other_id = other_id;
-		} else if (existing !== this) {
-			this.abandon();
-			throw new Error("Cannot negotiate multiple connections with the same peer.");
-		}
-
-		const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
-		if (this.other_id.polite() || !offer_collision) {
-			if (type == 'answer' && this.signalingState == 'stable') return;
-
-			// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
-			await this.setRemoteDescription({ type, sdp });
-			if (type == 'offer') {
-				await this.setLocalDescription();
-				await this.#ice_done();
-				return mung_sdp(this.localDescription);
+				await pc.setRemoteDescription(sdp);
+				if (sdp.type == 'offer') {
+					await pc.setLocalDescription();
+					await PeerConnection.source_route(back_path_parsed, {
+						type: 'connect',
+						expiration: get_expiration(),
+						sdp: pc.localDescription
+					});
+				}
+			} catch (e) {
+				console.error(e);
 			}
 		}
-	}
-
-	static async handle_connect(origin, description) {
-		// Find the peerconnection that has origin and try to negotiate it:
-		const existing = PeerConnection.connections.get(origin);
-		if (existing !== undefined) {
-			return await existing.negotiate(description);
-		} else {
-			// If there is no active peer connection, and this is an offer, then create one.
-			const pc = new PeerConnection();
-			pc.other_id = origin;
-			PeerConnection.connections.set(origin, pc);
-			return await pc.negotiate(description);
+		if (ice) {
+			try {
+				await pc.addIceCandidate(ice);
+			} catch {}
 		}
 	}
 
 	// Source route a message along a designated path.
 	static async source_route(path, msg) {
-		// TODO: check for loops and cut them out.
-		const body = JSON.stringify(msg);
-		const body_sig = await our_peerid.sign(body);
-		const back_path = [];
-		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
-		const forward_sig = await our_peerid.sign(forward_path);
-		console.log('send', msg);
-		await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed: []});
-	}
-	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {
 		// Check for routing loops:
 		const loop_check = new Map();
 		for (let i = 0; i < path.length; ++i) {
@@ -279,7 +209,16 @@ export class PeerConnection extends RTCPeerConnection {
 				loop_check.set(pid, i);
 			}
 		}
-		
+
+		const body = JSON.stringify(msg);
+		const body_sig = await our_peerid.sign(body);
+		const back_path = [];
+		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
+		const forward_sig = await our_peerid.sign(forward_path);
+		console.log('send', msg);
+		await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed: []});
+	}
+	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {		
 		for (const pid of path) {
 			const con = PeerConnection.connections.get(pid);
 			if (con !== undefined && con.is_open()) {
@@ -310,5 +249,5 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 }
-// PeerConnection.events.addEventListener('connected', console.log);
-// PeerConnection.events.addEventListener('disconnected', console.log);
+PeerConnection.events.addEventListener('connected', ({connection}) => console.log('connected', connection));
+PeerConnection.events.addEventListener('disconnected', ({connection}) => console.log('disconnected', connection));

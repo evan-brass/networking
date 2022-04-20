@@ -10,26 +10,69 @@ messages.addEventListener('connect', async e => {
 	const { origin, msg, back_path_parsed } = e;
 	// TODO: handle encrypting sdp
 	// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
-	const sdp = await PeerConnection.handle_connect(origin, msg.sdp);
+	const { sdp, ice } = msg;
+	const pc = PeerConnection.connections.get(origin) ?? create_pc(back_path_parsed);
+
 	if (sdp) {
-		await PeerConnection.source_route(back_path_parsed, {
-			type: 'connect',
-			expiration: get_expiration(),
-			sdp
-		});
+		try {
+			const offer_collision = (sdp.type == 'offer') && (pc.making_offer || pc.signalingState != 'stable');
+			const ignore_offer = !origin.polite() && offer_collision;
+
+			if (ignore_offer) return;
+
+			await pc.setRemoteDescription(sdp);
+			if (sdp.type == 'offer') {
+				await pc.setLocalDescription();
+				await PeerConnection.source_route(back_path_parsed, {
+					type: 'connect',
+					expiration: get_expiration(),
+					sdp: pc.localDescription
+				});
+			}
+		} catch (e) {
+			console.error(e);
+		}
+	}
+	if (ice) {
+		try {
+			await pc.addIceCandidate(ice);
+		} catch {}
 	}
 });
 
-export async function connect(back_path_parsed) {
-	// TODO: encrypt the sdp
-	// The sending peer is our sibling, and we don't have a connection to them: send them a connect message.
-	const sdp = await PeerConnection.handle_connect(back_path_parsed[0]);
-	if (sdp) {
-		// TODO: make sdp handling part of PeerConnection.handle_connect?
-		await PeerConnection.source_route(back_path_parsed, {
+function create_pc(path) {
+	const origin = path[0];
+	const pc = new PeerConnection();
+	pc.other_id = origin;
+	PeerConnection.connections.set(origin, pc);
+	pc.onnegotiationneeded = async () => {
+		try {
+			pc.making_offer = true;
+			await pc.setLocalDescription();
+			await PeerConnection.source_route(path, {
+				type: 'connect',
+				expiration: get_expiration(),
+				sdp: pc.localDescription
+			});
+		} catch (e) {
+			console.error(e);
+		} finally {
+			pc.making_offer = false;
+		}
+	};
+	pc.onicecandidate = async function ({ candidate }) {
+		console.log(this === pc);
+		if (candidate == null) return;
+		await PeerConnection.source_route(path, {
 			type: 'connect',
 			expiration: get_expiration(),
-			sdp
+			ice: candidate
 		});
-	}
+	};
+	return pc;
+}
+
+export function connect(path) {
+	// TODO: encrypt the sdp
+	const _pc = PeerConnection.connections.get(origin) ?? create_pc(path);
 }

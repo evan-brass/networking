@@ -39,11 +39,15 @@ function draw_network() {
 		const bi = bucket_index(pid.kad_id);
 		if (pid == our_peerid) {
 			ctx.fillStyle = 'red';
-		} else if (connection && connection.is_open()) {
-			if (is_sibling) {
-				ctx.fillStyle = 'orange';
+		} else if (connection) {
+			if (connection.is_open()) {
+				if (is_sibling) {
+					ctx.fillStyle = 'orange';
+				} else {
+					ctx.fillStyle = 'blue';
+				}
 			} else {
-				ctx.fillStyle = 'blue';
+				ctx.fillStyle = 'purple';
 			}
 		} else {
 			ctx.fillStyle = 'black';
