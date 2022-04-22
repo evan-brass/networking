@@ -11,6 +11,7 @@ messages.addEventListener('connect', async e => {
 	// TODO: handle encrypting sdp
 	// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
 	const { sdp, ice } = msg;
+	PeerConnection.handle_connect(origin, )
 	const pc = PeerConnection.connections.get(origin) ?? create_pc(back_path_parsed);
 
 	if (sdp) {

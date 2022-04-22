@@ -37,6 +37,8 @@ class DataChannelEvent extends CustomEvent {
 	}
 }
 
+
+
 /**
  * Our peer connection is a special RTCPeerConnection that also manages the RTCDataChannel for the hyperspace-network, as well as any other datachannels that are signalled (For GossipSub, or blockchain needs).  I'm trying to not have a separation between the routing table (peer_id -> websocket | rtcdatachannel) and the peer table (peer_id -> rtcpeerconnection) as that wasn't working very well.
  */
@@ -56,11 +58,6 @@ export class PeerConnection extends RTCPeerConnection {
 		super({ iceServers });
 
 		this.other_id = other_id;
-		if (this.other_id !== undefined) {
-			// TODO: setup automatic renegotiation / ice signaling
-			PeerConnection.connections.set(origin, this);
-
-		}
 
 		// TODO: Add a sub-protocol?
 		// Create the main hyperspace data channel which carries routing and signaling traffic.
@@ -252,3 +249,31 @@ export class PeerConnection extends RTCPeerConnection {
 }
 PeerConnection.events.addEventListener('connected', ({connection}) => console.log('connected', connection));
 PeerConnection.events.addEventListener('disconnected', ({connection}) => console.log('disconnected', connection));
+
+// Together connection_table + routing_table form a tree 
+// PeerId -> PeerConnection
+const connection_table = new Map();
+// PeerId -> PeerId + num_hops
+const routing_table = new WeakMap();
+
+// KBuckets
+const kbuckets = new Array(255);
+
+/**
+ * ROUTING:
+ * 1. Check the connection_table for a PeerConnection with an open / ready message_channel
+ * 2. Check the routing_table for a valid source path.
+ * 3. If there's no valid path, then do a kbucket lookup
+ * 4. If there's nothing in the kbuckets, then look for a peer that is closest 
+ */
+export async function try_send_msg(destination, msg) {
+	const path = [];
+	for (let step = destination; step !== undefined && !connection_table.has(step); step = routing_table.get(step)) {
+		path.push(step);
+	}
+	if (!connection_table.has(step)) {
+		// TODO: Send the message using the discovered path
+	} else {
+		// TODO: Send the message to the peer that is closest to the destination
+	}
+}
