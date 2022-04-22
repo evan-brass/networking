@@ -1,5 +1,142 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
 import { get_expiration } from "./lib.mjs";
+import { check_expiration } from "./lib.mjs";
+
+// TODO: TESTING / VISUALIZATION
+// PeerId -> Set<PeerId>
+export const network_diagram = new Map();
+setInterval(() => network_diagram.clear(), 5000);
+export function nd_connect(a, b) {
+	let nd = network_diagram.get(a);
+	if (!nd) {
+		nd = new Set();
+		network_diagram.set(a, nd);
+	}
+	nd.add(b);
+}
+
+// Message that can only be sent directly from peer to peer
+const routable = ['kbucket'];
+// Messages which can only be source_routed (no kademlia routing)
+const forwardable = ['siblings', 'not_siblings', 'connect', 'route_ack'];
+
+// Messages that have been verified will be sent as events on this object.
+// Additionally, we have the special 'route' message
+export const messages = new EventTarget();
+
+class MessageEvent extends CustomEvent {
+	constructor(props = {}, type = props.msg?.type) {
+		super(type, { cancelable: true });
+		for (const key in props) {
+			Object.defineProperty(this, key, {
+				value: props[key],
+				writable: false
+			});
+		}
+	}
+	async reply(msg) {
+		this.stopImmediatePropagation();
+		await PeerConnection.source_route(this.back_path_parsed, msg);
+	}
+}
+
+export async function verify_message(data, last_pid = our_peerid) {
+	let {
+		forward_path, forward_sig,
+		body, body_sig,
+		back_path
+	} = JSON.parse(data);
+
+	// Verify the back_path
+	if (!Array.isArray(back_path)) throw new Error('missing back_path');
+	const back_path_parsed = [];
+	if (back_path.length < 1) throw new Error("back path can't be empty.");
+	for (const hop of back_path) {
+		if (typeof hop != 'string') throw new Error('non-string in back_path');
+		let [peer_id, signature] = hop.split('.');
+		peer_id = await PeerId.from_encoded(peer_id ?? '');
+		if (!await peer_id.verify(signature ?? '', last_pid.public_key_encoded + body_sig ?? '')) throw new Error('signature failed in back_path.');
+		back_path_parsed.unshift(peer_id);
+
+		nd_connect(last_pid, peer_id);
+
+		// TODO: The following check might not work, when verifying forwarded subscribe messages
+		if (peer_id == our_peerid) throw new Error('Routing cycle detected in the back-path');
+
+		last_pid = peer_id;
+	}
+	const origin = back_path_parsed[0];
+
+	// Verify the forward_path:
+	let forward_path_parsed;
+	if (typeof forward_path == 'string') {
+		if (!origin.verify(forward_sig ?? '', forward_path)) throw new Error('forward_sig invalid.');
+		// Parse the forward_path:
+		forward_path_parsed = await Promise.all(forward_path.split(',').map(PeerId.from_encoded));
+	}
+
+	// Verify the body:
+	if (typeof body != 'string') throw new Error('message was missing a body');
+	if (!origin.verify(body_sig ?? '', body)) throw new Error('body_sig invalid.');
+
+	// Parse the body
+	const msg = JSON.parse(body);
+
+	// Check if the body has all required fields?
+	if (typeof msg?.type != 'string') throw new Error('Message was missing a type.');
+
+	// Routable messages need an expiration so that they can't be replayed.  Unroutable messages don't need an expiration because we the message comes directly from the sender.
+	let target;
+	if (routable.includes(msg.type)) {
+		target = BigInt('0x' + msg.target);
+		check_expiration(msg.expiration);
+	} else if (forwardable.includes(msg.type)) {
+		check_expiration(msg.expiration);
+	} else {
+		if (back_path_parsed.length != 1) throw new Error("Unroutable message was not sent directly to use.");
+	}
+
+	// TODO: Handle encryption
+
+	return {
+		origin, target,
+		forward_path_parsed, forward_path, forward_sig,
+		msg, 
+		body, body_sig,
+		back_path_parsed, back_path
+	};
+}
+
+// Together connection_table + routing_table form a tree 
+// PeerId -> PeerConnection
+const connection_table = new Map();
+// PeerId -> PeerId + num_hops
+const routing_table = new WeakMap();
+export function insert_back_path(back_path_parsed) {
+
+}
+
+// KBuckets
+const kbuckets = new Array(255);
+
+/**
+ * ROUTING:
+ * 1. Check the connection_table for a PeerConnection with an open / ready message_channel
+ * 2. Check the routing_table for a valid source path.
+ * 3. If there's no valid path, then do a kbucket lookup
+ * 4. If there's nothing in the kbuckets, then look for a peer that is closest 
+ */
+export async function try_send_msg(destination, msg) {
+	const path = [];
+	for (let step = destination; step !== undefined && !connection_table.has(step); step = routing_table.get(step)) {
+		path.push(step);
+	}
+	if (!connection_table.has(step)) {
+		// TODO: Send the message using the discovered path
+	} else {
+		// TODO: Send the message to the peer that is closest to the destination
+	}
+}
 
 // TODO: let the user edit their ICE configuration
 const iceServers = [{
@@ -123,8 +260,28 @@ export class PeerConnection extends RTCPeerConnection {
 			}
 		}
 	}
-	#network_msg({ data }) {
-		PeerConnection.events.dispatchEvent(new NetworkMessageEvent(this, data));
+	async #network_msg({ data }) {
+		const parts = await verify_message(data);
+		parts.connection = this;
+
+		if (parts.back_path_parsed[parts.back_path_parsed.length - 1] !== this.other_id) {
+			throw new Error("The other_id of the connection that this message came in on didn't put itself in the back_path properly.");
+		}
+
+		// Forward the message if we're not the intended target:
+		if (parts.forward_path_parsed && parts.forward_path_parsed[0] !== our_peerid) {
+			await PeerConnection.source_route_data(parts.forward_path_parsed, parts);
+			return;
+		}
+
+		// Issue the message as an event:
+		console.log('recv', parts.msg);
+		const not_handled = messages.dispatchEvent(new MessageEvent(parts));
+
+		// If the event does not have its propagation stopped, then route the message to a closer peer
+		if (not_handled && routable.includes(parts.msg.type)) {
+			messages.dispatchEvent(new MessageEvent(parts, 'route'));
+		}
 	}
 
 	#claimed_timeout_func() {
@@ -164,7 +321,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 
-	static async handle_connect(origin, { ice, sdp }) {
+	static async handle_connect(origin, back_path_parsed, { ice, sdp }) {
 		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
 		if (sdp) {
 			try {
@@ -253,30 +410,3 @@ export class PeerConnection extends RTCPeerConnection {
 PeerConnection.events.addEventListener('connected', ({connection}) => console.log('connected', connection));
 PeerConnection.events.addEventListener('disconnected', ({connection}) => console.log('disconnected', connection));
 
-// Together connection_table + routing_table form a tree 
-// PeerId -> PeerConnection
-const connection_table = new Map();
-// PeerId -> PeerId + num_hops
-const routing_table = new WeakMap();
-
-// KBuckets
-const kbuckets = new Array(255);
-
-/**
- * ROUTING:
- * 1. Check the connection_table for a PeerConnection with an open / ready message_channel
- * 2. Check the routing_table for a valid source path.
- * 3. If there's no valid path, then do a kbucket lookup
- * 4. If there's nothing in the kbuckets, then look for a peer that is closest 
- */
-export async function try_send_msg(destination, msg) {
-	const path = [];
-	for (let step = destination; step !== undefined && !connection_table.has(step); step = routing_table.get(step)) {
-		path.push(step);
-	}
-	if (!connection_table.has(step)) {
-		// TODO: Send the message using the discovered path
-	} else {
-		// TODO: Send the message to the peer that is closest to the destination
-	}
-}

@@ -1,7 +1,6 @@
 import { bootstrap_tracker } from "./core/bootstrap.mjs";
 import { PeerId } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
-import "./core/messages.mjs";
 import { refresh_bucket } from "./core/kbuckets.mjs";
 import { announce_self } from "./core/siblings.mjs";
 
@@ -25,4 +24,4 @@ async function heartbeat() {
 
 }
 heartbeat();
-setInterval(heartbeat, 10000);
+setInterval(heartbeat, 3000);

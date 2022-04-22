@@ -1,5 +1,5 @@
 import { PeerId, our_peerid } from "./core/peer-id.mjs";
-import { PeerConnection } from "./core/peer-connection.mjs";
+import { PeerConnection, network_diagram } from "./core/peer-connection.mjs";
 import { sibling_range } from "./core/siblings.mjs";
 import { bucket_index } from "./core/kbuckets.mjs";
 
@@ -59,6 +59,17 @@ function draw_network() {
 		ctx.fill();
 		ctx.font = "30px bold sans-serif";
 		ctx.fillText(bi, x + 20, y + 10);
+
+		// Draw the connections between this peer and others that we've sniffed.
+		ctx.strokeStyle = 'black';
+		for (const pid2 of network_diagram.get(pid) ?? []) {
+			const {x: x2, y: y2 } = position_pid(pid2);
+			ctx.beginPath();
+			ctx.moveTo(x, y);
+			ctx.lineTo(x2, y2);
+			ctx.closePath();
+			ctx.stroke();
+		}
 	}
 
 	// Draw the sniffed connections

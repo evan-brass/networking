@@ -1,6 +1,5 @@
 import { get_expiration } from "./lib.mjs";
-import { messages } from "./messages.mjs";
-import { PeerConnection } from "./peer-connection.mjs";
+import { PeerConnection, messages } from "./peer-connection.mjs";
 
 // TODO: In order to do the encryption, we need to have a map of encryption keys for outstanding connections.  We also need to cleanup that map as the connection initiation messages expire.
 // The map will serve two purposes: encryption and identifying which incoming connect messages are a response to a request_connect that we sent out.  We can also use it to deduplicate request_connect messages so that we don't accidentally try to connect to the same peer more than once.  Although, I think the PeerConnection.connections map should be deduplication enough.
@@ -10,8 +9,7 @@ messages.addEventListener('connect', async e => {
 	const { origin, msg, back_path_parsed } = e;
 	// TODO: handle encrypting sdp
 	// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
-	const { sdp, ice } = msg;
-	await PeerConnection.handle_connect(origin, msg);
+	await PeerConnection.handle_connect(origin, back_path_parsed, msg);
 });
 
 function create_pc(path) {

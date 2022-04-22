@@ -1,6 +1,5 @@
-import { PeerConnection } from "./peer-connection.mjs";
+import { PeerConnection, messages } from "./peer-connection.mjs";
 import { our_peerid } from "./peer-id.mjs";
-import { messages } from "./messages.mjs";
 import { connect } from "./connect.mjs";
 import { get_expiration } from "./lib.mjs";
 

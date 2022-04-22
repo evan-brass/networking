@@ -1,6 +1,5 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { PeerConnection } from "./peer-connection.mjs";
-import { messages } from "./messages.mjs";
+import { PeerConnection, messages, nd_connect } from "./peer-connection.mjs";
 import { get_expiration } from "./lib.mjs";
 import { connect } from "./connect.mjs";
 
@@ -112,6 +111,7 @@ messages.addEventListener('siblings', async e => {
 	// Look through their siblings and if any of them should be in our sibling list, then send them a sibling message:
 	for (const sib of msg.siblings) {
 		const pid = await PeerId.from_encoded(sib);
+		nd_connect(origin, pid);
 		if (pid !== our_peerid && !PeerConnection.connections.has(pid) && pid.kad_id < high && pid.kad_id > low) {
 			await PeerConnection.source_route([pid, ...back_path_parsed], siblings_msg());
 		}
@@ -119,9 +119,10 @@ messages.addEventListener('siblings', async e => {
 });
 // Listen for incoming not_siblings messages
 messages.addEventListener('not_siblings', async e => {
-	const { msg, back_path_parsed } = e;
+	const { origin, msg, back_path_parsed } = e;
 	e.stopImmediatePropagation();
 	const closest = await PeerId.from_encoded(msg.closest);
+	nd_connect(origin, closest);
 	const { high, low } = sibling_range();
 	if (closest.kad_id > low && closest.kad_id < high) {
 		await PeerConnection.source_route([closest, ...back_path_parsed], siblings_msg());
