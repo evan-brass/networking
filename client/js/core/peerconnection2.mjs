@@ -17,14 +17,15 @@ const routing_table = new WeakMap();
 
 
 export async function try_send_msg(destination, msg) {
-
+	// TODO: implement:
 }
 
 /**
  * ROUTING:
  * 1. Check the connection_table for a PeerConnection with an open / ready message_channel
  * 2. Check the routing_table for a valid source path.
- * 3. If there's no valid path, then send the message to the closest kbucket and let it be routed by the network
+ * 3. If there's no valid path, then do a kbucket lookup
+ * 4. If there's nothing in the kbuckets, then look for a peer that is closest 
  */
 export class PeerConnection extends RTCPeerConnection {
 	#making_offer = false; // Used by the perfect negotiation pattern.

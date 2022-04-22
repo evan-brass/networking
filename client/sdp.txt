@@ -1,0 +1,19 @@
+v=0
+o=- 7271525488628017021 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=candidate:2138393493 1 udp 2113937151 4ae805fb-659b-46e1-83fa-7e2716f5bccb.local 52758 typ host generation 0 network-cost 999
+a=ice-ufrag:qnDm
+a=ice-pwd:MB9U5fn/rKJPsrOrm8cW1Pv1
+a=ice-options:trickle
+a=fingerprint:sha-256 77:5D:69:B6:6C:95:9D:B7:2B:0D:E3:6C:AF:C8:83:CD:38:DA:6D:F3:C1:A8:CB:8C:DB:3B:C2:E4:30:97:1D:BA
+a=setup:actpass
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+

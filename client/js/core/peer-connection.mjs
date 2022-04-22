@@ -176,6 +176,7 @@ export class PeerConnection extends RTCPeerConnection {
 				await pc.setRemoteDescription(sdp);
 				if (sdp.type == 'offer') {
 					await pc.setLocalDescription();
+					// TODO: use try_send_msg instead
 					await PeerConnection.source_route(back_path_parsed, {
 						type: 'connect',
 						expiration: get_expiration(),
