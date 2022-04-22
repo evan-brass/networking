@@ -11,34 +11,7 @@ messages.addEventListener('connect', async e => {
 	// TODO: handle encrypting sdp
 	// TODO: Check to make sure that this connect either came from a connect_request that we sent or would otherwise fit into our routing table.
 	const { sdp, ice } = msg;
-	PeerConnection.handle_connect(origin, )
-	const pc = PeerConnection.connections.get(origin) ?? create_pc(back_path_parsed);
-
-	if (sdp) {
-		try {
-			const offer_collision = (sdp.type == 'offer') && (pc.making_offer || pc.signalingState != 'stable');
-			const ignore_offer = !origin.polite() && offer_collision;
-
-			if (ignore_offer) return;
-
-			await pc.setRemoteDescription(sdp);
-			if (sdp.type == 'offer') {
-				await pc.setLocalDescription();
-				await PeerConnection.source_route(back_path_parsed, {
-					type: 'connect',
-					expiration: get_expiration(),
-					sdp: pc.localDescription
-				});
-			}
-		} catch (e) {
-			console.error(e);
-		}
-	}
-	if (ice) {
-		try {
-			await pc.addIceCandidate(ice);
-		} catch {}
-	}
+	await PeerConnection.handle_connect(origin, msg);
 });
 
 function create_pc(path) {

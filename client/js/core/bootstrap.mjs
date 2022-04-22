@@ -1,4 +1,5 @@
 import { PeerConnection } from "./peer-connection.mjs";
+import { PeerId, our_peerid } from "./peer-id.mjs";
 
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
@@ -24,33 +25,7 @@ async function mung_sdp({type, sdp}) {
 	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${signature}`);
 	return {type, sdp};
 }
-
-async #ice_done() {
-	while (this.iceGatheringState != 'complete') {
-		await new Promise(res => {
-			this.addEventListener('icegatheringstatechange', res, { once: true });
-		});
-	}
-}
-// Should really only be used by bootstrap which needs to create peer connections without an other_id
-async negotiate({ type, sdp } = {}) {
-	// Ignore any changes if the peer connection is closed.
-	if (this.signalingState == 'closed') return;
-
-	if (type === undefined) {
-		// Skip trying to create an offer if we're already connected to this peer.
-		if (this.iceConnectionState == 'connected' || this.iceConnectionState == 'completed') return;
-		
-		// Negotiate will be called without a description when we are initiating a connection to another peer, or when we are generating offers for webtorrent trackers.
-		this.#making_offer = true;
-
-		await this.setLocalDescription();
-		await this.#ice_done();
-
-		this.#making_offer = false;
-		return mung_sdp(this.localDescription);
-	}
-	// We're creating an answer.
+async function unmung_sdp({ type, sdp }) {
 	// Get the DTLS fingerprint(s) from the sdp (In our case, there should always just be a single fingerprint, but just in case...)
 	const fingerprints_bytes = get_fingerprints_bytes(sdp);
 
@@ -63,44 +38,14 @@ async negotiate({ type, sdp } = {}) {
 	const valid = await other_id.verify(signature_str, fingerprints_bytes);
 	if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
 
-	// Check to make sure that we don't switch what peer is on the other side of this connection.
-	if (other_id == our_peerid || (this.other_id && this.other_id !== other_id)) {
-		throw new Error("Something bad happened - this massage shouldn't have been sent to this peer.");
-	}
-	const existing = PeerConnection.connections.get(other_id)
-	if (existing === undefined) {
-		PeerConnection.connections.set(other_id, this);
-		this.other_id = other_id;
-	} else if (existing !== this) {
-		this.abandon();
-		throw new Error("Cannot negotiate multiple connections with the same peer.");
-	}
-
-	const offer_collision = type == 'offer' && (this.#making_offer || this.signalingState !== 'stable');
-	if (this.other_id.polite() || !offer_collision) {
-		if (type == 'answer' && this.signalingState == 'stable') return;
-
-		// Now that we know that this offer came from another Hyperspace Peer, we can answer it.
-		await this.setRemoteDescription({ type, sdp });
-		if (type == 'offer') {
-			await this.setLocalDescription();
-			await this.#ice_done();
-			return mung_sdp(this.localDescription);
-		}
-	}
+	return other_id;
 }
 
-static async handle_connect(origin, description) {
-	// Find the peerconnection that has origin and try to negotiate it:
-	const existing = PeerConnection.connections.get(origin);
-	if (existing !== undefined) {
-		return await existing.negotiate(description);
-	} else {
-		// If there is no active peer connection, and this is an offer, then create one.
-		const pc = new PeerConnection();
-		pc.other_id = origin;
-		PeerConnection.connections.set(origin, pc);
-		return await pc.negotiate(description);
+async function ice_done(pc) {
+	while (pc.iceGatheringState != 'complete') {
+		await new Promise(res => {
+			pc.addEventListener('icegatheringstatechange', res, { once: true });
+		});
 	}
 }
 
@@ -146,19 +91,29 @@ async function get_ws(tracker) {
 				}, 30000)); // I really don't know why using the actual interval that the tracker sends us doesn't work, but oh well.
 			}
 			if (msg.offer) {
-				const pc = new PeerConnection();
-				const answer = await pc.negotiate(msg.offer);
-				ws.send(JSON.stringify({
-					action: 'announce',
-					peer_id, info_hash: msg.info_hash,
-					to_peer_id: msg.peer_id,
-					offer_id: msg.offer_id,
-					answer
-				}));
+				const pid = await unmung_sdp(msg.offer);
+				if (!PeerConnection.connections.has(pid)) {
+					const pc = new PeerConnection(pid);
+					await pc.setRemoteDescription(msg.offer);
+					await pc.setLocalDescription();
+					const answer = await mung_sdp(pc.localDescription);
+					ws.send(JSON.stringify({
+						action: 'announce',
+						peer_id, info_hash: msg.info_hash,
+						to_peer_id: msg.peer_id,
+						offer_id: msg.offer_id,
+						answer
+					}));
+				}
 			} else if (msg.answer) {
-				const pc = peer_conns.get(msg.offer_id)
-				await pc.negotiate(msg.answer);
-				peer_conns.delete(msg.offer_id);
+				const pid = await unmung_sdp(msg.answer);
+				const pc = peer_conns.get(msg.offer_id);
+				if (pc) {
+					await pc.setRemoteDescription(msg.answer);
+					pc.other_id = pid;
+					PeerConnection.connections.set(pid, pc);
+					peer_conns.delete(msg.offer_id);
+				}
 			}
 		};
 		ws.onclose = () => {
@@ -192,9 +147,12 @@ export async function bootstrap_tracker(info_hash, tracker) {
 	const offer_id = r20bs();
 	let pc = new PeerConnection();
 	peer_conns.set(offer_id, pc);
+	await pc.setLocalDescription();
+	await ice_done(pc);
+	const offer = await mung_sdp(pc.localDescription);
 	const offers = [{
 		offer_id,
-		offer: await pc.negotiate()
+		offer
 	}];
 
 	ws.send(JSON.stringify({

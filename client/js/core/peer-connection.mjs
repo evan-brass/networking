@@ -57,7 +57,10 @@ export class PeerConnection extends RTCPeerConnection {
 	constructor(other_id) {
 		super({ iceServers });
 
-		this.other_id = other_id;
+		if (other_id) {
+			this.other_id = other_id;
+			PeerConnection.connections.set(other_id, this);
+		}
 
 		// TODO: Add a sub-protocol?
 		// Create the main hyperspace data channel which carries routing and signaling traffic.
@@ -161,7 +164,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 
-	static handle_connect(origin, { ice, sdp }) {
+	static async handle_connect(origin, { ice, sdp }) {
 		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
 		if (sdp) {
 			try {
