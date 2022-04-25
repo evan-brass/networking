@@ -10,7 +10,7 @@ function timeout(t = 10000) {
 
 async function heartbeat() {
 	if (PeerConnection.connections.size < 1) {
-		let b = bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://qot.abiir.top:443/announce");
+		let b = bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://tracker.btorrent.xyz");
 		await Promise.race([b, timeout()]);
 	} else {
 		await announce_self();

@@ -7,6 +7,10 @@ import { base64_decode, base64_encode, P256, text_encoder, uint8array_to_bigint 
  */
 const {publicKey, privateKey} = await crypto.subtle.generateKey(P256, false, ['sign', 'verify']);
 let our_peerid;
+const {publicKey: encryptionPublic, privateKey: encryptionPrivate} = await crypto.subtle.generateKey({
+	name: 'ECDH',
+	...P256
+});
 
 /**
  * The PeerId class is just a container for the kad_id, and encoded public key so that we don't need to recreate them all the time (which would require async crypto calls.)

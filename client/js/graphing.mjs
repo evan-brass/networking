@@ -2,6 +2,7 @@ import { PeerId, our_peerid } from "./core/peer-id.mjs";
 import { PeerConnection, network_diagram } from "./core/peer-connection.mjs";
 import { sibling_range } from "./core/siblings.mjs";
 import { bucket_index } from "./core/kbuckets.mjs";
+import { routing_table } from "./core/routing.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -34,13 +35,13 @@ function draw_network() {
 	for (const wr of PeerId.peer_ids.values()) {
 		const pid = wr.deref();
 		if (pid == undefined) continue;
-		const connection = PeerConnection.connections.get(pid);
+		const connection = routing_table.get(pid);
 		const is_sibling = pid.kad_id >= low && pid.kad_id <= high;
 		const bi = bucket_index(pid.kad_id);
 		if (pid == our_peerid) {
 			ctx.fillStyle = 'red';
-		} else if (connection) {
-			if (connection.is_open()) {
+		} else if (connection instanceof RTCDataChannel) {
+			if (connection.readyState == 'open') {
 				if (is_sibling) {
 					ctx.fillStyle = 'orange';
 				} else {

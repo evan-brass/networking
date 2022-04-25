@@ -1,6 +1,6 @@
-import { PeerConnection, messages } from "./peer-connection.mjs";
+import { PeerConnection } from "./peer-connection.mjs";
+import { messages } from "./message.mjs";
 import { our_peerid } from "./peer-id.mjs";
-import { connect } from "./connect.mjs";
 import { get_expiration } from "./lib.mjs";
 
 /**
@@ -11,7 +11,7 @@ import { get_expiration } from "./lib.mjs";
  * Whatever design decisions we make, we'll need to eventually simulate the network and verify that it performs well under various attack methods.
  */
 
-const k = 2;
+const k = 1;
 
 const buckets = [];
 
@@ -101,17 +101,17 @@ PeerConnection.events.addEventListener('disconnected', ({ connection }) => {
 });
 
 // Listen for incoming request_connect messages with a bits field
-messages.addEventListener('request_connect', async e => {
-	const { msg, origin, back_path_parsed } = e;
-	if (msg.bits !== undefined) {
-		// TODO: check if we would fit inside the requester's kbucket and check if we have space in our kbucket for the requestor.
-		if (could_fit(origin) && bucket_index(our_peerid.kad_id, origin.kad_id) === msg.bits) {
-			e.stopImmediatePropagation();
-			// Connect to the peer:
-			await connect(back_path_parsed);
-		}
-	}
-});
+// messages.addEventListener('request_connect', async e => {
+// 	const { msg, origin, back_path_parsed } = e;
+// 	if (msg.bits !== undefined) {
+// 		// TODO: check if we would fit inside the requester's kbucket and check if we have space in our kbucket for the requestor.
+// 		if (could_fit(origin) && bucket_index(our_peerid.kad_id, origin.kad_id) === msg.bits) {
+// 			e.stopImmediatePropagation();
+// 			// Connect to the peer:
+// 			await connect(back_path_parsed);
+// 		}
+// 	}
+// });
 
 // Route a message as close to a target as possible.
 const closer_cnt = 5;

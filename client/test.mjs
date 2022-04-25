@@ -26,6 +26,36 @@ async function on_ice({ candidate }) {
 a.onicecandidate = on_ice;
 b.onicecandidate = on_ice;
 
+function parse_sdp(sdp) {
+	const ice_ufrag = /a=ice-ufrag:(.+)/.exec(sdp)[1];
+	const ice_pwd = /a=ice-pwd:(.+)/.exec(sdp)[1];
+	let dtls_fingerprint = /a=fingerprint:sha-256 (.+)/.exec(sdp)[1];
+	dtls_fingerprint = dtls_fingerprint.split(':');
+	dtls_fingerprint = new Uint8Array(dtls_fingerprint.map(s => parseInt(s, 16)));
+	return { ice_ufrag, ice_pwd, dtls_fingerprint };
+}
+function rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, server = true) {
+	return { type: 'answer', sdp:
+`v=0
+o=- 5721234437895308592 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=ice-ufrag:${ice_ufrag}
+a=ice-pwd:${ice_pwd}
+a=ice-options:trickle
+a=fingerprint:sha-256 ${Array.from(dtls_fingerprint).map(b => b.toString(16).padStart(2, '0')).join(':')}
+a=setup:${server ? 'passive' : 'active'}
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+` };
+}
+
 (async function() {
 	// Both connections create an offer
 	await a.setLocalDescription();
@@ -33,16 +63,12 @@ b.onicecandidate = on_ice;
 	
 	// Turn each peer's local description (an offer) into an answer
 	// We make a the DTLS server (by telling a that b will be active) and we make b the DTLS client (by telling b that a will be passive).
-	let b_sdp = b.localDescription.sdp;
-	b_sdp = b_sdp.replace('a=setup:actpass', 'a=setup:active');
-	let a_sdp = a.localDescription.sdp;
-	a_sdp = a_sdp.replace('a=setup:actpass', 'a=setup:passive');
-	
-	// Log the modified SDP and then set it as the remote description.
-	console.log(b_sdp);
-	await a.setRemoteDescription({ type: 'answer', sdp: b_sdp });
-	console.log(a_sdp);
-	await b.setRemoteDescription({ type: 'answer', sdp: a_sdp });
+	const b_ans = rehydrate_answer(parse_sdp(b.localDescription.sdp), true);
+	console.log(b_ans);
+	const a_ans = rehydrate_answer(parse_sdp(a.localDescription.sdp), false);
+	console.log(a_ans);
+	await a.setRemoteDescription(b_ans);
+	await b.setRemoteDescription(a_ans);
 	
 	// Inspect the final local descriptions' sdp (which should include ice candidates at this point.)
 	await new Promise(res => setTimeout(res, 1000));

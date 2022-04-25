@@ -1,6 +1,7 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
 import { get_expiration } from "./lib.mjs";
-import { check_expiration } from "./lib.mjs";
+import { routing_table, send_msg } from "./routing.mjs";
+import { messages, verify_message, MessageEvent } from "./message.mjs";
 
 // TODO: TESTING / VISUALIZATION
 // PeerId -> Set<PeerId>
@@ -13,129 +14,6 @@ export function nd_connect(a, b) {
 		network_diagram.set(a, nd);
 	}
 	nd.add(b);
-}
-
-// Message that can only be sent directly from peer to peer
-const routable = ['kbucket'];
-// Messages which can only be source_routed (no kademlia routing)
-const forwardable = ['siblings', 'not_siblings', 'connect', 'route_ack'];
-
-// Messages that have been verified will be sent as events on this object.
-// Additionally, we have the special 'route' message
-export const messages = new EventTarget();
-
-class MessageEvent extends CustomEvent {
-	constructor(props = {}, type = props.msg?.type) {
-		super(type, { cancelable: true });
-		for (const key in props) {
-			Object.defineProperty(this, key, {
-				value: props[key],
-				writable: false
-			});
-		}
-	}
-	async reply(msg) {
-		this.stopImmediatePropagation();
-		await PeerConnection.source_route(this.back_path_parsed, msg);
-	}
-}
-
-export async function verify_message(data, last_pid = our_peerid) {
-	let {
-		forward_path, forward_sig,
-		body, body_sig,
-		back_path
-	} = JSON.parse(data);
-
-	// Verify the back_path
-	if (!Array.isArray(back_path)) throw new Error('missing back_path');
-	const back_path_parsed = [];
-	if (back_path.length < 1) throw new Error("back path can't be empty.");
-	for (const hop of back_path) {
-		if (typeof hop != 'string') throw new Error('non-string in back_path');
-		let [peer_id, signature] = hop.split('.');
-		peer_id = await PeerId.from_encoded(peer_id ?? '');
-		if (!await peer_id.verify(signature ?? '', last_pid.public_key_encoded + body_sig ?? '')) throw new Error('signature failed in back_path.');
-		back_path_parsed.unshift(peer_id);
-
-		nd_connect(last_pid, peer_id);
-
-		// TODO: The following check might not work, when verifying forwarded subscribe messages
-		if (peer_id == our_peerid) throw new Error('Routing cycle detected in the back-path');
-
-		last_pid = peer_id;
-	}
-	const origin = back_path_parsed[0];
-
-	// Verify the forward_path:
-	let forward_path_parsed;
-	if (typeof forward_path == 'string') {
-		if (!origin.verify(forward_sig ?? '', forward_path)) throw new Error('forward_sig invalid.');
-		// Parse the forward_path:
-		forward_path_parsed = await Promise.all(forward_path.split(',').map(PeerId.from_encoded));
-	}
-
-	// Verify the body:
-	if (typeof body != 'string') throw new Error('message was missing a body');
-	if (!origin.verify(body_sig ?? '', body)) throw new Error('body_sig invalid.');
-
-	// Parse the body
-	const msg = JSON.parse(body);
-
-	// Check if the body has all required fields?
-	if (typeof msg?.type != 'string') throw new Error('Message was missing a type.');
-
-	// Routable messages need an expiration so that they can't be replayed.  Unroutable messages don't need an expiration because we the message comes directly from the sender.
-	let target;
-	if (routable.includes(msg.type)) {
-		target = BigInt('0x' + msg.target);
-		check_expiration(msg.expiration);
-	} else if (forwardable.includes(msg.type)) {
-		check_expiration(msg.expiration);
-	} else {
-		if (back_path_parsed.length != 1) throw new Error("Unroutable message was not sent directly to use.");
-	}
-
-	// TODO: Handle encryption
-
-	return {
-		origin, target,
-		forward_path_parsed, forward_path, forward_sig,
-		msg, 
-		body, body_sig,
-		back_path_parsed, back_path
-	};
-}
-
-// Together connection_table + routing_table form a tree 
-// PeerId -> PeerConnection
-const connection_table = new Map();
-// PeerId -> PeerId + num_hops
-const routing_table = new WeakMap();
-export function insert_back_path(back_path_parsed) {
-
-}
-
-// KBuckets
-const kbuckets = new Array(255);
-
-/**
- * ROUTING:
- * 1. Check the connection_table for a PeerConnection with an open / ready message_channel
- * 2. Check the routing_table for a valid source path.
- * 3. If there's no valid path, then do a kbucket lookup
- * 4. If there's nothing in the kbuckets, then look for a peer that is closest 
- */
-export async function try_send_msg(destination, msg) {
-	const path = [];
-	for (let step = destination; step !== undefined && !connection_table.has(step); step = routing_table.get(step)) {
-		path.push(step);
-	}
-	if (!connection_table.has(step)) {
-		// TODO: Send the message using the discovered path
-	} else {
-		// TODO: Send the message to the peer that is closest to the destination
-	}
 }
 
 // TODO: let the user edit their ICE configuration
@@ -159,13 +37,6 @@ class DisconnectedEvent extends CustomEvent {
 		this.connection = peer_connection;
 	}
 }
-class NetworkMessageEvent extends CustomEvent {
-	constructor(peer_connection, data) {
-		super('network-message');
-		this.connection = peer_connection;
-		this.data = data;
-	}
-}
 class DataChannelEvent extends CustomEvent {
 	constructor(peer_connection, channel) {
 		super('datachannel');
@@ -174,19 +45,53 @@ class DataChannelEvent extends CustomEvent {
 	}
 }
 
-
+// For data-channels, it seems we don't need to follow the normal offer-answer flow.  Instead we can just send a few important pieces of information from the sdp and then we can pass ice candidates.
+function parse_sdp(sdp) {
+	const ice_ufrag = /a=ice-ufrag:(.+)/.exec(sdp)[1];
+	const ice_pwd = /a=ice-pwd:(.+)/.exec(sdp)[1];
+	let dtls_fingerprint = /a=fingerprint:sha-256 (.+)/.exec(sdp)[1];
+	dtls_fingerprint = dtls_fingerprint.split(':');
+	dtls_fingerprint = new Uint8Array(dtls_fingerprint.map(s => parseInt(s, 16)));
+	return { ice_ufrag, ice_pwd, dtls_fingerprint };
+}
+function rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, server = true) {
+	dtls_fingerprint = Array.from(dtls_fingerprint).map(b => b.toString(16).padStart(2, '0')).join(':');
+	return { type: 'answer', sdp:
+`v=0
+o=- 5721234437895308592 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=ice-ufrag:${ice_ufrag}
+a=ice-pwd:${ice_pwd}
+a=ice-options:trickle
+a=fingerprint:sha-256 ${dtls_fingerprint}
+a=setup:${server ? 'passive' : 'active'}
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+` };
+}
 
 /**
  * Our peer connection is a special RTCPeerConnection that also manages the RTCDataChannel for the hyperspace-network, as well as any other datachannels that are signalled (For GossipSub, or blockchain needs).  I'm trying to not have a separation between the routing table (peer_id -> websocket | rtcdatachannel) and the peer table (peer_id -> rtcpeerconnection) as that wasn't working very well.
  */
 export class PeerConnection extends RTCPeerConnection {
-	// Connections is a map from PeerId -> PeerConnection  We use it to make sure we don't open two connections to the same peer.
-	static connections = new Map();
+	// Set of all the open / openning PeerConections
+	// The primary key for the a connection is: (other_id, dtls-fingerprint)
+	// The ice-ufrag and ice-pwd can change because of ice-restarts.  If the dtls-fingerprint is the same, then we don't need to create a new connection.  We only need a new peerconnection if the dtls fingerprint is different.
+	static connections = new Set();
+	static async connect(other_id) {
+
+	}
 	// Events announces when our peer connections open or close.
 	static events = new EventTarget();
 	// Label -> RTCDataChannel
 	data_channels = new Map();
-	#making_offer = false;
 	#claimed = 0;
 
 	#connecting_timeout = false;
@@ -214,6 +119,7 @@ export class PeerConnection extends RTCPeerConnection {
 			if (this.connectionState == 'disconnected' || this.connectionState == 'failed') this.abandon();
 		};
 	}
+	
 	#channel({ channel }) {
 		if (channel.readyState == 'open') {
 			this.#channel_open({ target: channel });
@@ -230,6 +136,7 @@ export class PeerConnection extends RTCPeerConnection {
 		// Only keep one of each datachannel:
 		if (channel.label == 'hyperspace-network') {
 			channel.onmessage = this.#network_msg.bind(this);
+			connection_table.set(this.other_id, channel);
 			if (this.#connecting_timeout !== undefined) {
 				clearTimeout(this.#connecting_timeout);
 				this.#connecting_timeout = undefined;
@@ -291,15 +198,15 @@ export class PeerConnection extends RTCPeerConnection {
 		this.#claimed_timeout = false;
 	}
 	claim() {
-		this.#claimed += 1;
-		if (this.#claimed_timeout) clearTimeout(this.#claimed_timeout);
-		this.#claimed_timeout = false;
+		// this.#claimed += 1;
+		// if (this.#claimed_timeout) clearTimeout(this.#claimed_timeout);
+		// this.#claimed_timeout = false;
 	}
 	release() {
-		this.#claimed -= 1;
-		if (this.#claimed == 0 && this.#claimed_timeout == false) {
-			this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-		}
+		// this.#claimed -= 1;
+		// if (this.#claimed == 0 && this.#claimed_timeout == false) {
+		// 	this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
+		// }
 	}
 	is_open() {
 		const nc = this.data_channels.get('hyperspace-network');

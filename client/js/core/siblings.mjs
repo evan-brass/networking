@@ -1,7 +1,8 @@
 import { our_peerid, PeerId } from "./peer-id.mjs";
-import { PeerConnection, messages, nd_connect } from "./peer-connection.mjs";
+import { PeerConnection, nd_connect } from "./peer-connection.mjs";
+import { messages } from "./message.mjs";
 import { get_expiration } from "./lib.mjs";
-import { connect } from "./connect.mjs";
+// import { connect } from "./connect.mjs";
 
 /**
  * How should the sibling list route messages?  
@@ -97,26 +98,26 @@ PeerConnection.events.addEventListener('disconnected', ({ connection }) => {
 });
 
 // Listen for incoming sibling messages
-messages.addEventListener('siblings', async e => {
-	const { msg, origin, back_path_parsed } = e;
-	e.stopImmediatePropagation();
-	// The sender thinks that we're siblings
-	const { high, low } = sibling_range();
+// messages.addEventListener('siblings', async e => {
+// 	const { msg, origin, back_path_parsed } = e;
+// 	e.stopImmediatePropagation();
+// 	// The sender thinks that we're siblings
+// 	const { high, low } = sibling_range();
 
-	if (origin.kad_id < low || origin.kad_id > high) {
-		await PeerConnection.source_route(back_path_parsed, not_siblings_msg(back_path_parsed));
-	} else if (!PeerConnection.connections.has(origin)) {
-		await connect(back_path_parsed);
-	}
-	// Look through their siblings and if any of them should be in our sibling list, then send them a sibling message:
-	for (const sib of msg.siblings) {
-		const pid = await PeerId.from_encoded(sib);
-		nd_connect(origin, pid);
-		if (pid !== our_peerid && !PeerConnection.connections.has(pid) && pid.kad_id < high && pid.kad_id > low) {
-			await PeerConnection.source_route([pid, ...back_path_parsed], siblings_msg());
-		}
-	}
-});
+// 	if (origin.kad_id < low || origin.kad_id > high) {
+// 		await PeerConnection.source_route(back_path_parsed, not_siblings_msg(back_path_parsed));
+// 	} else if (!PeerConnection.connections.has(origin)) {
+// 		await connect(back_path_parsed);
+// 	}
+// 	// Look through their siblings and if any of them should be in our sibling list, then send them a sibling message:
+// 	for (const sib of msg.siblings) {
+// 		const pid = await PeerId.from_encoded(sib);
+// 		nd_connect(origin, pid);
+// 		if (pid !== our_peerid && !PeerConnection.connections.has(pid) && pid.kad_id < high && pid.kad_id > low) {
+// 			await PeerConnection.source_route([pid, ...back_path_parsed], siblings_msg());
+// 		}
+// 	}
+// });
 // Listen for incoming not_siblings messages
 messages.addEventListener('not_siblings', async e => {
 	const { origin, msg, back_path_parsed } = e;
