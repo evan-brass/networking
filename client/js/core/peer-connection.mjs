@@ -1,6 +1,6 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
 import { get_expiration } from "./lib.mjs";
-import { routing_table, send_msg } from "./routing.mjs";
+import { routing_table, route_msg } from "./routing.mjs";
 import { messages, verify_message, MessageEvent } from "./message.mjs";
 
 // TODO: TESTING / VISUALIZATION
@@ -42,14 +42,14 @@ class DisconnectedEvent extends CustomEvent {
 }
 class DataChannelEvent extends CustomEvent {
 	constructor(peer_connection, channel) {
-		super('datachannel');
+		super('datachannel', { cancelable: true });
 		this.connection = peer_connection;
 		this.channel = channel;
 	}
 }
 
 // For data-channels, it seems we don't need to follow the normal offer-answer flow.  Instead we can just send a few important pieces of information from the sdp and then we can pass ice candidates.
-function parse_sdp(sdp) {
+export function parse_sdp(sdp) {
 	const ice_ufrag = /a=ice-ufrag:(.+)/.exec(sdp)[1];
 	const ice_pwd = /a=ice-pwd:(.+)/.exec(sdp)[1];
 	let dtls_fingerprint = /a=fingerprint:sha-256 (.+)/.exec(sdp)[1];
@@ -99,6 +99,20 @@ export class PeerConnection extends RTCPeerConnection {
 		// Create a new PeerConnection
 		return new PeerConnection(other_id);
 	}
+	static async handle_connect(origin, { ice, ice_ufrag, ice_pwd, dtls_fingerprint }) {
+		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
+		// TODO: if the dtls_fingerprint doesn't match, then we need to kill the peerconnection and open a new one.
+		if (ice_ufrag !== pc.ice_ufrag || ice_pwd !== pc.ice_pwd) {
+			const answer = rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, origin.polite());
+			await pc.setRemoteDescription(answer);
+		}
+		if (ice) {
+			try {
+				await pc.addIceCandidate(ice);
+			} catch {}
+		}
+		return pc;
+	}
 
 	constructor(other_id) {
 		super({ iceServers, certificates });
@@ -110,7 +124,7 @@ export class PeerConnection extends RTCPeerConnection {
 			this.addEventListener('negotiationneeded', async () => {
 				await this.setLocalDescription();
 				const { ice_ufrag, ice_pwd, dtls_fingerprint } = parse_sdp(this.localDescription.sdp);
-				await send_msg({
+				await route_msg({
 					target: this.other_id,
 					type: 'connect',
 					encrypted: {
@@ -122,7 +136,7 @@ export class PeerConnection extends RTCPeerConnection {
 			this.addEventListener('icecandidate', async ({ candidate }) => {
 				if (!candidate) return;
 
-				await send_msg({
+				await route_msg({
 					target: this.other_id,
 					type: 'connect',
 					encrypted: {
@@ -178,7 +192,8 @@ export class PeerConnection extends RTCPeerConnection {
 				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
 			}
 		} else {
-			const handled = PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
+			const not_handled = PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
+			if (not_handled) channel.close();
 		}
 	}
 	#channel_close({ target: channel }) {
@@ -213,43 +228,13 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 	is_open() {
-		return this.dc?.readyState == 'open';
+		return this.dc?.readyState === 'open';
 	}
 	abandon() {
 		this.close();
 		PeerConnection.connections.delete(this.other_id);
 		if (this.other_id) {
 			PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
-		}
-	}
-
-	static async handle_connect(origin, back_path_parsed, { ice, sdp }) {
-		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
-		if (sdp) {
-			try {
-				const offer_collision = (sdp.type == 'offer') && (pc.making_offer || pc.signalingState != 'stable');
-				const ignore_offer = !origin.polite() && offer_collision;
-
-				if (ignore_offer) return;
-
-				await pc.setRemoteDescription(sdp);
-				if (sdp.type == 'offer') {
-					await pc.setLocalDescription();
-					// TODO: use try_send_msg instead
-					await PeerConnection.source_route(back_path_parsed, {
-						type: 'connect',
-						expiration: get_expiration(),
-						sdp: pc.localDescription
-					});
-				}
-			} catch (e) {
-				console.error(e);
-			}
-		}
-		if (ice) {
-			try {
-				await pc.addIceCandidate(ice);
-			} catch {}
 		}
 	}
 	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {		
@@ -283,6 +268,3 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 }
-PeerConnection.events.addEventListener('connected', ({connection}) => console.log('connected', connection));
-PeerConnection.events.addEventListener('disconnected', ({connection}) => console.log('disconnected', connection));
-

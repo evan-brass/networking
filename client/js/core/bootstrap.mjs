@@ -1,4 +1,4 @@
-import { PeerConnection } from "./peer-connection.mjs";
+import { parse_sdp, PeerConnection } from "./peer-connection.mjs";
 import { PeerId, our_peerid } from "./peer-id.mjs";
 
 
@@ -92,26 +92,23 @@ async function get_ws(tracker) {
 			}
 			if (msg.offer) {
 				const pid = await unmung_sdp(msg.offer);
-				if (!PeerConnection.connections.has(pid)) {
-					const pc = new PeerConnection(pid);
-					await pc.setRemoteDescription(msg.offer);
-					await pc.setLocalDescription();
-					const answer = await mung_sdp(pc.localDescription);
-					ws.send(JSON.stringify({
-						action: 'announce',
-						peer_id, info_hash: msg.info_hash,
-						to_peer_id: msg.peer_id,
-						offer_id: msg.offer_id,
-						answer
-					}));
-				}
+				const props = parse_sdp(msg.offer);
+				const pc = await PeerConnection.handle_connect(pid, props);
+				const answer = await mung_sdp(pc.localDescription);
+				ws.send(JSON.stringify({
+					action: 'announce',
+					peer_id, info_hash: msg.info_hash,
+					to_peer_id: msg.peer_id,
+					offer_id: msg.offer_id,
+					answer
+				}));
 			} else if (msg.answer) {
 				const pid = await unmung_sdp(msg.answer);
 				const pc = peer_conns.get(msg.offer_id);
 				if (pc) {
-					await pc.setRemoteDescription(msg.answer);
 					pc.other_id = pid;
-					PeerConnection.connections.set(pid, pc);
+					const props = parse_sdp(msg.answer);
+					await PeerConnection.handle_connect(pid, props);
 					peer_conns.delete(msg.offer_id);
 				}
 			}

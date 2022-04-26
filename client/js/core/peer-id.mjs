@@ -1,11 +1,16 @@
 import { base64_decode, base64_encode, P256, P256DH, text_decoder, text_encoder, uint8array_to_bigint } from "./lib.mjs";
 
-// A PeerID is an ECDSA + ECDH pair of keypairs.  The ECDSA pair is used to sign messages, and the ECDH is used to encrypt messages.
-// We derive a Kademlia ID (256bit BigInt) using sha-256 on the xy coordinates of both public keys.  The Kademlia ID defines the position of each node in the routing / DHT structure.
+/**
+ * A PeerID is a pair of keypairs: ECDSA + ECDH.  The ECDSA pair is used to sign messages, and the ECDH is used to encrypt messages.
+ * We derive a Kademlia ID (256bit BigInt) using sha-256 on the xy coordinates of both public keys.  The Kademlia ID defines the
+ * position of each node in the routing / DHT structure.
+ * The encoded form of a PeerId is `<ecdsa base64 encoded>&<ecdh base64 encoded>`.  The encoded form is what shows up in the back path
+ * and in the sibling lists.  (In the future we should just use binary for everything, but...anyway)
+ */
 const {publicKey: ecdsa, privateKey: ecdsa_priv} = await crypto.subtle.generateKey(P256, false, ['sign']);
 const {publicKey: ecdh, privateKey: ecdh_priv} = await crypto.subtle.generateKey(P256DH, false, ['deriveKey']);
 
-// Since we have two keys, our new encoded form will be `<ecdsa base64 encoded>&<ecdh base64 encoded>`  The encoded form is what will identify peers in the message paths and is what you would send in a list of your siblings during peer-exchange.
+// Since we have two keys, our new encoded form will be   The encoded form is what will identify peers in the message paths and is what you would send in a list of your siblings during peer-exchange.
 
 // encoded -> Weak<PeerId>
 export const known_ids = new Map();
@@ -15,11 +20,10 @@ export function cleanup_known_ids() {
 
 // Sign some data using our peer's ecdsa key
 export async function sign(data) {
-	if (this !== our_peerid) throw new Error("We can only sign from our_peerid");
-	if (typeof buffer == 'string') {
-		buffer = text_encoder.encode(buffer);
+	if (typeof data == 'string') {
+		data = text_encoder.encode(data);
 	}
-	const signature = await crypto.subtle.sign(P256, ecdsa_priv, buffer);
+	const signature = await crypto.subtle.sign(P256, ecdsa_priv, data);
 	return base64_encode(new Uint8Array(signature));
 }
 // Decrypt some ciphertext that was encrypted using an ephmeral ECDH key and our public ECDH key
@@ -80,6 +84,9 @@ export class PeerId {
 		const ret = new PeerId({ecdsa, ecdh, kad_id, encoded});
 		known_ids.set(encoded, new WeakRef(ret));
 		return ret;
+	}
+	polite() {
+		return our_peerid.kad_id < this.kad_id;
 	}
 	async encrypt(data) {
 		// Convert data to a buffer if it is text

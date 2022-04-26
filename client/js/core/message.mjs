@@ -1,6 +1,6 @@
 import { decrypt, PeerId, sign } from "./peer-id.mjs";
 import { check_expiration } from "./lib.mjs";
-import { known_connection } from "./routing.mjs";
+import { known_path } from "./routing.mjs";
 
 
 // Message that can only be sent directly from peer to peer
@@ -48,7 +48,7 @@ export async function verify_message(data, last_pid = our_peerid) {
 
 		// nd_connect(last_pid, peer_id);
 
-		known_connection(last_pid, peer_id);
+		known_path(last_pid, peer_id);
 
 		// TODO: The following check might not work, when verifying forwarded subscribe messages
 		if (peer_id == our_peerid) throw new Error('Routing cycle detected in the back-path');
