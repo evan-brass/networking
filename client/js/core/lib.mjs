@@ -27,6 +27,10 @@ export const P256 = {
 	namedCurve: 'P-256',
 	hash: 'SHA-256'
 };
+export const P256DH = {
+	...P256,
+	name: 'ECDH'
+};
 
 // Expiration creation / checking
 export function get_expiration(future = 5 /* min. in the future that the expiration will expire. */) {

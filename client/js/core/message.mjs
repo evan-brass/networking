@@ -1,4 +1,4 @@
-import { PeerId } from "./peer-id.mjs";
+import { decrypt, PeerId, sign } from "./peer-id.mjs";
 import { check_expiration } from "./lib.mjs";
 import { known_connection } from "./routing.mjs";
 
@@ -71,6 +71,11 @@ export async function verify_message(data, last_pid = our_peerid) {
 
 	// Parse the body
 	const msg = JSON.parse(body);
+
+	// Decrypt any encrypted message data
+	if (msg.encrypted) {
+		Object.assign(msg, JSON.parse(await decrypt(msg.encrypted)));
+	}
 
 	// Check if the body has all required fields?
 	if (typeof msg?.type != 'string') throw new Error('Message was missing a type.');

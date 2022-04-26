@@ -16,6 +16,9 @@ export function nd_connect(a, b) {
 	nd.add(b);
 }
 
+// We don't care what this certificate is, but we want it to be reused long enough for all peers that might still have a peerconnection for our peerid have closed it.  That way the DTLS fingerprint never changes underneath a peerConnection.
+const certificates = [await RTCPeerConnection.generateCertificate(P256)];
+
 // TODO: let the user edit their ICE configuration
 const iceServers = [{
 	// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
@@ -81,27 +84,52 @@ a=max-message-size:262144
  * Our peer connection is a special RTCPeerConnection that also manages the RTCDataChannel for the hyperspace-network, as well as any other datachannels that are signalled (For GossipSub, or blockchain needs).  I'm trying to not have a separation between the routing table (peer_id -> websocket | rtcdatachannel) and the peer table (peer_id -> rtcpeerconnection) as that wasn't working very well.
  */
 export class PeerConnection extends RTCPeerConnection {
-	// Set of all the open / openning PeerConections
-	// The primary key for the a connection is: (other_id, dtls-fingerprint)
-	// The ice-ufrag and ice-pwd can change because of ice-restarts.  If the dtls-fingerprint is the same, then we don't need to create a new connection.  We only need a new peerconnection if the dtls fingerprint is different.
-	static connections = new Set();
-	static async connect(other_id) {
+	dc;
+	#connecting_timeout = false;
+	// PeerId -> PeerConnection
+	static connections = new Map();
 
-	}
 	// Events announces when our peer connections open or close.
 	static events = new EventTarget();
-	// Label -> RTCDataChannel
-	data_channels = new Map();
-	#claimed = 0;
 
-	#connecting_timeout = false;
-	#claimed_timeout = false;
+	static connect(other_id) {
+		let c = PeerConnection.connections.get(other_id);
+		if (c) return c;
+
+		// Create a new PeerConnection
+		return new PeerConnection(other_id);
+	}
+
 	constructor(other_id) {
-		super({ iceServers });
+		super({ iceServers, certificates });
 
 		if (other_id) {
 			this.other_id = other_id;
 			PeerConnection.connections.set(other_id, this);
+
+			this.addEventListener('negotiationneeded', async () => {
+				await this.setLocalDescription();
+				const { ice_ufrag, ice_pwd, dtls_fingerprint } = parse_sdp(this.localDescription.sdp);
+				await send_msg({
+					target: this.other_id,
+					type: 'connect',
+					encrypted: {
+						ice_ufrag, ice_pwd,
+						dtls_fingerprint
+					}
+				});
+			});
+			this.addEventListener('icecandidate', async ({ candidate }) => {
+				if (!candidate) return;
+
+				await send_msg({
+					target: this.other_id,
+					type: 'connect',
+					encrypted: {
+						ice: candidate
+					}
+				});
+			});
 		}
 
 		// TODO: Add a sub-protocol?
@@ -132,39 +160,31 @@ export class PeerConnection extends RTCPeerConnection {
 		channel.onerror = console.error;
 	}
 	#channel_open({ target: channel }) {
-		const existing = this.data_channels.get(channel.label);
-		// Only keep one of each datachannel:
+		// We deduplicate hyperspace-network channels, but we don't deduplicate other channels.
 		if (channel.label == 'hyperspace-network') {
 			channel.onmessage = this.#network_msg.bind(this);
-			connection_table.set(this.other_id, channel);
+			routing_table.set(this.other_id, channel);
 			if (this.#connecting_timeout !== undefined) {
 				clearTimeout(this.#connecting_timeout);
 				this.#connecting_timeout = undefined;
 			}
-		} else {
-			PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
-		}
-		if (existing) {
-			if (existing.id < channel.id) {
-				this.data_channels.set(channel.label, channel);
-				existing.close();
+			if (this.dc) {
+				if (channel.id > this.dc.id) {
+					this.dc.close();
+					this.dc = channel;
+				}
 			} else {
-				channel.close();
-			}
-		} else {
-			this.data_channels.set(channel.label, channel);
-			if (channel.label == 'hyperspace-network') {
+				this.dc = channel;
 				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
 			}
+		} else {
+			const handled = PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
 		}
 	}
 	#channel_close({ target: channel }) {
-		const existing = this.data_channels.get(channel.label);
-		if (existing === channel) {
-			this.data_channels.delete(channel.label);
-			if (channel.label == 'hyperspace-network') {
-				PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
-			}
+		if (this.dc === channel) {
+			this.dc = null;
+			PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
 		}
 	}
 	async #network_msg({ data }) {
@@ -181,6 +201,8 @@ export class PeerConnection extends RTCPeerConnection {
 			return;
 		}
 
+		// If we're not the intended recipient, then we need to try to route the message closer to it's intended target
+
 		// Issue the message as an event:
 		console.log('recv', parts.msg);
 		const not_handled = messages.dispatchEvent(new MessageEvent(parts));
@@ -190,35 +212,8 @@ export class PeerConnection extends RTCPeerConnection {
 			messages.dispatchEvent(new MessageEvent(parts, 'route'));
 		}
 	}
-
-	#claimed_timeout_func() {
-		if (this.#claimed == 0) {
-			this.abandon();
-		}
-		this.#claimed_timeout = false;
-	}
-	claim() {
-		// this.#claimed += 1;
-		// if (this.#claimed_timeout) clearTimeout(this.#claimed_timeout);
-		// this.#claimed_timeout = false;
-	}
-	release() {
-		// this.#claimed -= 1;
-		// if (this.#claimed == 0 && this.#claimed_timeout == false) {
-		// 	this.#claimed_timeout = setTimeout(this.#claimed_timeout_func.bind(this), 5000);
-		// }
-	}
 	is_open() {
-		const nc = this.data_channels.get('hyperspace-network');
-		return nc?.readyState == 'open';
-	}
-	send(data) {
-		const nc = this.data_channels.get('hyperspace-network');
-		if (nc?.readyState == 'open') {
-			nc.send(data);
-		} else {
-			throw new Error("The datachannel for this peer connection is not in an open readyState.");
-		}
+		return this.dc?.readyState == 'open';
 	}
 	abandon() {
 		this.close();
@@ -256,32 +251,6 @@ export class PeerConnection extends RTCPeerConnection {
 				await pc.addIceCandidate(ice);
 			} catch {}
 		}
-	}
-
-	// Source route a message along a designated path.
-	static async source_route(path, msg) {
-		// Check for routing loops:
-		const loop_check = new Map();
-		for (let i = 0; i < path.length; ++i) {
-			const pid = path[i];
-			const first_seen = loop_check.get(pid);
-			if (first_seen !== undefined) {
-				// Snip the loop
-				console.log("snipped a loop while source routing: ", path, first_seen, i - first_seen);
-				path.splice(first_seen, i - first_seen);
-				i = first_seen + 1;
-			} else {
-				loop_check.set(pid, i);
-			}
-		}
-
-		const body = JSON.stringify(msg);
-		const body_sig = await our_peerid.sign(body);
-		const back_path = [];
-		const forward_path = path.map(pid => pid.public_key_encoded).join(',');
-		const forward_sig = await our_peerid.sign(forward_path);
-		console.log('send', msg);
-		await PeerConnection.source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed: []});
 	}
 	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {		
 		for (const pid of path) {

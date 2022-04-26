@@ -1,4 +1,4 @@
-import { our_peerid } from "./peer-id.mjs";
+import { our_peerid, PeerId } from "./peer-id.mjs";
 
 /**
  * We have two options: store the connections inside the topology data structures, or store the 
@@ -19,7 +19,7 @@ const kbuckets = new Array(255);
 const siblings_above = [];
 const siblings_below = [];
 
-// PeerId -> RTCDataChannel | PeerId
+// PeerId -> RTCPeerConnection | PeerId
 export const routing_table = new WeakMap();
 
 export function known_connection(from, to) {
@@ -55,9 +55,26 @@ export function known_connection(from, to) {
  * Eventually, sadly, we will need the ability to send messages reliably.  That means handling broken_path messages by 
  * resending the message without a path.
  */
-export async function send_msg(destination /* :Kademlia ID */, msg) {
+export async function send_msg(msg) {
+	const { target } = msg;
+	if (!(target instanceof PeerId)) throw new Error('Messages need a target');
+	// Convert the target into an encoded kad_id
+	msg.target = target.kad_id.toString(16);
+
+	// Handle encrypting the encrypted field:
+	if (!(target instanceof PeerId)) throw new Error('Messages need a target');
+
+	// Convert the target into an encoded kad_id
+	msg.target = target.kad_id.toString(16);
+
+	// Handle encrypting the encrypted field:
+	if (typeof msg.encrypted == 'object') {
+		msg.encrypted = await target.encrypt(JSON.stringify(msg.encrypted));
+	}
+
+	// Stringify the body and compute our signature:
 	const body = JSON.stringify(msg);
-	const body_sig = await our_peerid.sign(body);
+	const body_sig = await sign(body);
 
 	const path = [destination];
 	let step = routing_table.get(destination);
