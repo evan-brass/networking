@@ -1,5 +1,5 @@
 import { parse_sdp, PeerConnection } from "./peer-connection.mjs";
-import { PeerId, our_peerid } from "./peer-id.mjs";
+import { PeerId, our_peerid, sign } from "./peer-id.mjs";
 
 
 // We use a special SDP attribute to identify the rtcpeerconnection:
@@ -21,8 +21,8 @@ function get_fingerprints_bytes(sdp) {
 async function mung_sdp({type, sdp}) {
 	// Modify the offer with a signature of our DTLS fingerprint:
 	const fingerprints_bytes = get_fingerprints_bytes(sdp);
-	const signature = await our_peerid.sign(fingerprints_bytes);
-	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.public_key_encoded}.${signature}`);
+	const signature = await sign(fingerprints_bytes);
+	sdp = sdp.replace(/^s=.+/gm, `s=${our_peerid.encoded}.${signature}`);
 	return {type, sdp};
 }
 async function unmung_sdp({ type, sdp }) {
@@ -39,6 +39,13 @@ async function unmung_sdp({ type, sdp }) {
 	if (!valid) throw new Error("The signature in the offer didn't match the DTLS fingerprint(s).");
 
 	return other_id;
+}
+function* extract_candidates(sdp) {
+	const reg = /a=candidate:(.+)/gm;
+	let res;
+	while (res = reg.exec(sdp)) {
+		yield new RTCIceCandidate({ candidate: 'candidate:' + res[1], sdpMLineIndex: 0 });
+	}
 }
 
 async function ice_done(pc) {
@@ -61,6 +68,15 @@ const peer_id = r20bs();
 const peer_conns = new Map();
 // tracker address -> WebSocket
 const tracker_conns = new Map();
+
+let bootstrap_waiters = new Set();
+function clean_waiters() {
+	for (const w of bootstrap_waiters) {
+		w();
+	}
+	bootstrap_waiters.clear();
+}
+
 async function get_ws(tracker) {
 	let ws = tracker_conns.get(tracker);
 	if (!ws || ws.readyState == 2 || ws.readyState == 3) {
@@ -92,8 +108,13 @@ async function get_ws(tracker) {
 			}
 			if (msg.offer) {
 				const pid = await unmung_sdp(msg.offer);
-				const props = parse_sdp(msg.offer);
-				const pc = await PeerConnection.handle_connect(pid, props);
+				const pc = new PeerConnection();
+				pc.other_id = pid;
+				PeerConnection.connections.set(pid, pc);
+				await pc.setRemoteDescription(msg.offer);
+				await pc.setLocalDescription();
+				await ice_done(pc);
+				await ice_done(pc);
 				const answer = await mung_sdp(pc.localDescription);
 				ws.send(JSON.stringify({
 					action: 'announce',
@@ -102,15 +123,17 @@ async function get_ws(tracker) {
 					offer_id: msg.offer_id,
 					answer
 				}));
+				clean_waiters();
 			} else if (msg.answer) {
 				const pid = await unmung_sdp(msg.answer);
 				const pc = peer_conns.get(msg.offer_id);
 				if (pc) {
 					pc.other_id = pid;
-					const props = parse_sdp(msg.answer);
-					await PeerConnection.handle_connect(pid, props);
+					PeerConnection.connections.set(pid, pc);
+					await pc.setRemoteDescription(msg.answer);
 					peer_conns.delete(msg.offer_id);
 				}
+				clean_waiters();
 			}
 		};
 		ws.onclose = () => {
@@ -118,17 +141,11 @@ async function get_ws(tracker) {
 				clearInterval(i);
 			}
 		};
+	} else if (ws.readyState == 0) {
+		await new Promise(res => ws.addEventListener('open', res, {once: true}));
 	}
 	return ws;
 }
-
-let bootstrap_waiters = new Set();
-PeerConnection.events.addEventListener('connected', () => {
-	for (const r of bootstrap_waiters) {
-		r();
-	}
-	bootstrap_waiters.clear();
-});
 
 export async function bootstrap_tracker(info_hash, tracker) {
 	// Soo... Even closed RTCPeerConnections count against our limit (in chrome the limit is 500 connections)

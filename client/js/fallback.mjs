@@ -1,8 +1,6 @@
 import { bootstrap_tracker } from "./core/bootstrap.mjs";
 import { PeerId } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
-import { refresh_bucket } from "./core/kbuckets.mjs";
-import { announce_self } from "./core/siblings.mjs";
 
 function timeout(t = 10000) {
 	return new Promise(r => setTimeout(r, t));
@@ -10,18 +8,14 @@ function timeout(t = 10000) {
 
 async function heartbeat() {
 	if (PeerConnection.connections.size < 1) {
-		let b = bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://tracker.btorrent.xyz");
-		await Promise.race([b, timeout()]);
+		await bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://tracker.btorrent.xyz");
 	} else {
-		await announce_self();
+		// await announce_self();
 
-		await refresh_bucket();
+		// await refresh_bucket();
 	}
 
 	// TODO: refresh a stale bucket if needed.
-
-	PeerId.cleanup_cache();
-
+	setTimeout(heartbeat, 3000);
 }
 heartbeat();
-setInterval(heartbeat, 3000);

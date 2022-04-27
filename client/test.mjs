@@ -71,7 +71,7 @@ a=max-message-size:262144
 	await b.setRemoteDescription(a_ans);
 	
 	// Inspect the final local descriptions' sdp (which should include ice candidates at this point.)
-	await new Promise(res => setTimeout(res, 1000));
+	await new Promise(res => setTimeout(res, 5000));
 	console.log(a.localDescription.sdp);
 	console.log(b.localDescription.sdp);
 })();

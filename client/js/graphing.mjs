@@ -1,8 +1,5 @@
-import { PeerId, our_peerid } from "./core/peer-id.mjs";
-import { PeerConnection, network_diagram } from "./core/peer-connection.mjs";
-import { sibling_range } from "./core/siblings.mjs";
-import { bucket_index } from "./core/kbuckets.mjs";
-import { routing_table } from "./core/routing.mjs";
+import { PeerId, our_peerid, known_ids } from "./core/peer-id.mjs";
+import { PeerConnection } from "./core/peer-connection.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -31,46 +28,28 @@ function draw_network() {
 	ctx.stroke();
 
 	// Draw out all of the peer_ids that we've ever seen
-	const { high, low } = sibling_range();
-	for (const wr of PeerId.peer_ids.values()) {
+	for (const wr of known_ids.values()) {
 		const pid = wr.deref();
 		if (pid == undefined) continue;
-		const connection = routing_table.get(pid);
-		const is_sibling = pid.kad_id >= low && pid.kad_id <= high;
-		const bi = bucket_index(pid.kad_id);
+		const conn = PeerConnection.connections.get(pid);
+
 		if (pid == our_peerid) {
 			ctx.fillStyle = 'red';
-		} else if (connection instanceof RTCDataChannel) {
-			if (connection.readyState == 'open') {
-				if (is_sibling) {
-					ctx.fillStyle = 'orange';
-				} else {
-					ctx.fillStyle = 'blue';
-				}
-			} else {
-				ctx.fillStyle = 'purple';
-			}
+		} else if (conn instanceof PeerConnection && conn.is_open()) {
+			ctx.fillStyle = 'blue';
 		} else {
 			ctx.fillStyle = 'black';
 		}
+
+		// const bi = bucket_index(pid.kad_id);
+		
 		const {x, y} = position_pid(pid);
 		ctx.beginPath();
 		ctx.arc(x, y, node_radius, 0, 2 * Math.PI);
 		ctx.closePath();
 		ctx.fill();
-		ctx.font = "30px bold sans-serif";
-		ctx.fillText(bi, x + 20, y + 10);
-
-		// Draw the connections between this peer and others that we've sniffed.
-		ctx.strokeStyle = 'black';
-		for (const pid2 of network_diagram.get(pid) ?? []) {
-			const {x: x2, y: y2 } = position_pid(pid2);
-			ctx.beginPath();
-			ctx.moveTo(x, y);
-			ctx.lineTo(x2, y2);
-			ctx.closePath();
-			ctx.stroke();
-		}
+		// ctx.font = "30px bold sans-serif";
+		// ctx.fillText(bi, x + 20, y + 10);
 	}
 
 	// Draw the sniffed connections

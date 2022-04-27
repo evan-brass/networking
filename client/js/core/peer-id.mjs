@@ -71,19 +71,23 @@ export class PeerId {
 		Object.assign(this, ...arguments);
 	}
 	static async from_encoded(encoded) {
-		const existing = known_ids.get(encoded);
-		if (existing) {
-			const pid = existing.deref();
-			if (pid) return pid;
+		try {
+			const existing = known_ids.get(encoded);
+			if (existing) {
+				const pid = existing.deref();
+				if (pid) return pid;
+			}
+	
+			let [ecdsa, ecdh] = encoded.split('&').map(base64_decode);
+			ecdsa = await crypto.subtle.importKey('raw', ecdsa, P256, true, ['verify']);
+			ecdh = await crypto.subtle.importKey('raw', ecdh, P256DH, true, []);
+			const kad_id = await derive_kad_id(ecdsa, ecdh);
+			const ret = new PeerId({ecdsa, ecdh, kad_id, encoded});
+			known_ids.set(encoded, new WeakRef(ret));
+			return ret;
+		} catch (e) {
+			console.error(e);
 		}
-
-		let [ecdsa, ecdh] = encoded.split('&').map(base64_decode);
-		ecdsa = await crypto.subtle.importKey('raw', ecdsa, P256, false, ['verify']);
-		ecdh = await crypto.subtle.importKey('raw', ecdh, P256DH, false, ['deriveKey']);
-		const kad_id = await derive_kad_id(ecdsa, ecdh);
-		const ret = new PeerId({ecdsa, ecdh, kad_id, encoded});
-		known_ids.set(encoded, new WeakRef(ret));
-		return ret;
 	}
 	polite() {
 		return our_peerid.kad_id < this.kad_id;
@@ -135,6 +139,7 @@ export const our_peerid = await (async function() {
 	const ecdh_encoded = base64_encode(new Uint8Array(await crypto.subtle.exportKey('raw', ecdh)));
 	// We can't give different encoded forms to different peers because it would invalidate the back_path signatures.  I know... it should really be based on public key bytes the same way that kad_id is, but that would be harder to implement.  An alternative would be to base the signature in the back_path off of the hex encoded kad_id but that feels pretty much just as dirty...
 	const encoded = `${ecdsa_encoded}&${ecdh_encoded}`;
-
+	
 	return new PeerId({ecdsa, ecdh, kad_id, encoded});
 })();
+known_ids.set(our_peerid.encoded, new WeakRef(our_peerid));

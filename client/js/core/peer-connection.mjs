@@ -1,20 +1,8 @@
 import { PeerId, our_peerid } from "./peer-id.mjs";
-import { get_expiration } from "./lib.mjs";
-import { routing_table, route_msg } from "./routing.mjs";
+import { get_expiration, P256 } from "./lib.mjs";
+// import { routing_table, route_msg } from "./routing.mjs";
 import { messages, verify_message, MessageEvent } from "./message.mjs";
-
-// TODO: TESTING / VISUALIZATION
-// PeerId -> Set<PeerId>
-export const network_diagram = new Map();
-setInterval(() => network_diagram.clear(), 5000);
-export function nd_connect(a, b) {
-	let nd = network_diagram.get(a);
-	if (!nd) {
-		nd = new Set();
-		network_diagram.set(a, nd);
-	}
-	nd.add(b);
-}
+import { add_conn, remove_conn, send, send_data } from "./routing.mjs";
 
 // We don't care what this certificate is, but we want it to be reused long enough for all peers that might still have a peerconnection for our peerid have closed it.  That way the DTLS fingerprint never changes underneath a peerConnection.
 const certificates = [await RTCPeerConnection.generateCertificate(P256)];
@@ -28,18 +16,6 @@ const iceServers = [{
 	]
 }];
 
-class ConnectedEvent extends CustomEvent {
-	constructor(peer_connection) {
-		super('connected');
-		this.connection = peer_connection;
-	}
-}
-class DisconnectedEvent extends CustomEvent {
-	constructor(peer_connection) {
-		super('disconnected');
-		this.connection = peer_connection;
-	}
-}
 class DataChannelEvent extends CustomEvent {
 	constructor(peer_connection, channel) {
 		super('datachannel', { cancelable: true });
@@ -86,6 +62,7 @@ a=max-message-size:262144
 export class PeerConnection extends RTCPeerConnection {
 	dc;
 	#connecting_timeout = false;
+	
 	// PeerId -> PeerConnection
 	static connections = new Map();
 
@@ -100,10 +77,19 @@ export class PeerConnection extends RTCPeerConnection {
 		return new PeerConnection(other_id);
 	}
 	static async handle_connect(origin, { ice, ice_ufrag, ice_pwd, dtls_fingerprint }) {
-		const pc = PeerConnection.connections.get(origin) ?? new PeerConnection(origin);
+		const pc = PeerConnection.connect(origin);
+		while (pc.localDescription == null) {
+			await new Promise(res => pc.addEventListener('signalingstatechange', res, {once: true}));
+		}
 		// TODO: if the dtls_fingerprint doesn't match, then we need to kill the peerconnection and open a new one.
 		if (ice_ufrag !== pc.ice_ufrag || ice_pwd !== pc.ice_pwd) {
+			if (pc.ice_ufrag !== undefined) {
+				await pc.restartIce();
+			}
 			const answer = rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, origin.polite());
+			pc.ice_ufrag = ice_ufrag;
+			pc.ice_pwd = ice_pwd;
+			pc.dtls_fingerprint = dtls_fingerprint;
 			await pc.setRemoteDescription(answer);
 		}
 		if (ice) {
@@ -120,12 +106,11 @@ export class PeerConnection extends RTCPeerConnection {
 		if (other_id) {
 			this.other_id = other_id;
 			PeerConnection.connections.set(other_id, this);
-
+	
 			this.addEventListener('negotiationneeded', async () => {
 				await this.setLocalDescription();
 				const { ice_ufrag, ice_pwd, dtls_fingerprint } = parse_sdp(this.localDescription.sdp);
-				await route_msg({
-					target: this.other_id,
+				await send(this.other_id, {
 					type: 'connect',
 					encrypted: {
 						ice_ufrag, ice_pwd,
@@ -135,9 +120,8 @@ export class PeerConnection extends RTCPeerConnection {
 			});
 			this.addEventListener('icecandidate', async ({ candidate }) => {
 				if (!candidate) return;
-
-				await route_msg({
-					target: this.other_id,
+	
+				await send(this.other_id, {
 					type: 'connect',
 					encrypted: {
 						ice: candidate
@@ -177,7 +161,6 @@ export class PeerConnection extends RTCPeerConnection {
 		// We deduplicate hyperspace-network channels, but we don't deduplicate other channels.
 		if (channel.label == 'hyperspace-network') {
 			channel.onmessage = this.#network_msg.bind(this);
-			routing_table.set(this.other_id, channel);
 			if (this.#connecting_timeout !== undefined) {
 				clearTimeout(this.#connecting_timeout);
 				this.#connecting_timeout = undefined;
@@ -189,7 +172,7 @@ export class PeerConnection extends RTCPeerConnection {
 				}
 			} else {
 				this.dc = channel;
-				PeerConnection.events.dispatchEvent(new ConnectedEvent(this));
+				add_conn(this);
 			}
 		} else {
 			const not_handled = PeerConnection.events.dispatchEvent(new DataChannelEvent(this, channel));
@@ -199,20 +182,23 @@ export class PeerConnection extends RTCPeerConnection {
 	#channel_close({ target: channel }) {
 		if (this.dc === channel) {
 			this.dc = null;
-			PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
+			remove_conn(this);
 		}
 	}
 	async #network_msg({ data }) {
-		const parts = await verify_message(data);
-		parts.connection = this;
+		const {origin, msg, body, body_sig, back_path_parsed, back_path} = await verify_message(data);
 
+		// Check to make sure that whoever forwarded this to us put themself into the back_path properly
 		if (parts.back_path_parsed[parts.back_path_parsed.length - 1] !== this.other_id) {
 			throw new Error("The other_id of the connection that this message came in on didn't put itself in the back_path properly.");
 		}
 
 		// Forward the message if we're not the intended target:
-		if (parts.forward_path_parsed && parts.forward_path_parsed[0] !== our_peerid) {
-			await PeerConnection.source_route_data(parts.forward_path_parsed, parts);
+		if (parts.msg)
+		if (parts.msg.target instanceof BigInt) {
+
+		} else if (parts.msg.path && parts.msg.path[0] !== our_peerid) {
+			await send_data({body, body_sig, back_path});
 			return;
 		}
 
@@ -234,37 +220,7 @@ export class PeerConnection extends RTCPeerConnection {
 		this.close();
 		PeerConnection.connections.delete(this.other_id);
 		if (this.other_id) {
-			PeerConnection.events.dispatchEvent(new DisconnectedEvent(this));
-		}
-	}
-	static async source_route_data(path, {forward_path, forward_sig, body, body_sig, back_path, back_path_parsed}) {		
-		for (const pid of path) {
-			const con = PeerConnection.connections.get(pid);
-			if (con !== undefined && con.is_open()) {
-				// Only include the forward path if we aren't sending directly to the intended target
-				if (path[0] === con.other_id) {
-					forward_path = undefined;
-					forward_sig = undefined;
-				}
-				const back_path_sig = await our_peerid.sign(pid.public_key_encoded + body_sig);
-				const new_back_path = [`${our_peerid.public_key_encoded}.${back_path_sig}`, ...back_path];
-
-				con.send(JSON.stringify({
-					forward_path, forward_sig,
-					body, body_sig,
-					back_path: new_back_path
-				}));
-				return;
-			}
-		}
-		const is_broken_path = JSON.parse(body).type == 'broken_path';
-		if (back_path_parsed.length > 0 && !is_broken_path) {
-			await PeerConnection.source_route(back_path_parsed, {
-				type: 'broken_path',
-				expiration: get_expiration(),
-				broken_forward_path: forward_path,
-				broken_forward_sig: forward_sig
-			});
+			remove_conn(this);
 		}
 	}
 }
