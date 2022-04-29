@@ -1,8 +1,15 @@
 import { get_expiration } from "./lib.mjs";
 import { PeerId, sign, our_peerid } from "./peer-id.mjs";
-import { add_conn as k_add_conn, remove_conn as k_remove_conn, lookup } from "./kbuckets.mjs";
-import { add_conn as s_add_conn, remove_conn as s_remove_conn } from "./kbuckets.mjs";
-import { below, closer } from "./siblings.mjs";
+import { add_conn as k_add_conn, remove_conn as k_remove_conn, lookup, could_fit } from "./kbuckets.mjs";
+import { add_conn as s_add_conn, remove_conn as s_remove_conn, closer, sib_fit } from "./siblings.mjs";
+
+export const wanted_conns = new EventTarget();
+class WantedEvent extends CustomEvent {
+	constructor(pid) {
+		super('wanted');
+		this.peer_id = pid;
+	}
+}
 
 /**
  * Routing:
@@ -32,7 +39,15 @@ export function known_path(from, to) {
 	const from_entry = sr_tree.get(from);
 	if (!from_entry) return;
 
-	sr_tree.set(to, from);
+	const existing = sr_tree.get(to);
+	if (existing == undefined || existing instanceof PeerId) {
+		sr_tree.set(to, from);
+
+		// If the discovered peer is one we want a connection to then we should send it to wanted_conns
+		if (could_fit(to) || sib_fit(to)) {
+			wanted_conns.dispatchEvent(new WantedEvent(to));
+		}
+	}
 }
 
 export function add_conn(peer_connection) {

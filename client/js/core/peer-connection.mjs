@@ -1,8 +1,8 @@
 import { our_peerid } from "./peer-id.mjs";
 import { P256 } from "./lib.mjs";
 // import { routing_table, route_msg } from "./routing.mjs";
-import { handle_data } from "./message.mjs";
-import { add_conn, remove_conn, send } from "./routing.mjs";
+import { handle_data, messages } from "./message.mjs";
+import { add_conn, remove_conn, send, wanted_conns } from "./routing.mjs";
 
 // We don't care what this certificate is, but we want it to be reused long enough for all peers that might still have a peerconnection for our peerid have closed it.  That way the DTLS fingerprint never changes underneath a peerConnection.
 const certificates = [await RTCPeerConnection.generateCertificate(P256)];
@@ -28,13 +28,10 @@ class DataChannelEvent extends CustomEvent {
 export function parse_sdp(sdp) {
 	const ice_ufrag = /a=ice-ufrag:(.+)/.exec(sdp)[1];
 	const ice_pwd = /a=ice-pwd:(.+)/.exec(sdp)[1];
-	let dtls_fingerprint = /a=fingerprint:sha-256 (.+)/.exec(sdp)[1];
-	dtls_fingerprint = dtls_fingerprint.split(':');
-	dtls_fingerprint = new Uint8Array(dtls_fingerprint.map(s => parseInt(s, 16)));
+	const dtls_fingerprint = /a=fingerprint:sha-256 (.+)/.exec(sdp)[1];
 	return { ice_ufrag, ice_pwd, dtls_fingerprint };
 }
 function rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, server = true) {
-	dtls_fingerprint = Array.from(dtls_fingerprint).map(b => b.toString(16).padStart(2, '0')).join(':');
 	return { type: 'answer', sdp:
 `v=0
 o=- 5721234437895308592 2 IN IP4 127.0.0.1
@@ -76,16 +73,13 @@ export class PeerConnection extends RTCPeerConnection {
 		// Create a new PeerConnection
 		return new PeerConnection(other_id);
 	}
-	static async handle_connect(origin, { ice, ice_ufrag, ice_pwd, dtls_fingerprint }) {
+	static async handle_connect({origin, msg: { ice, ice_ufrag, ice_pwd, dtls_fingerprint }}) {
 		const pc = PeerConnection.connect(origin);
 		while (pc.localDescription == null) {
 			await new Promise(res => pc.addEventListener('signalingstatechange', res, {once: true}));
 		}
 		// TODO: if the dtls_fingerprint doesn't match, then we need to kill the peerconnection and open a new one.
-		if (ice_ufrag !== pc.ice_ufrag || ice_pwd !== pc.ice_pwd) {
-			if (pc.ice_ufrag !== undefined) {
-				await pc.restartIce();
-			}
+		if (ice_ufrag && (ice_ufrag !== pc.ice_ufrag || ice_pwd !== pc.ice_pwd)) {
 			const answer = rehydrate_answer({ ice_ufrag, ice_pwd, dtls_fingerprint }, origin.polite());
 			pc.ice_ufrag = ice_ufrag;
 			pc.ice_pwd = ice_pwd;
@@ -97,7 +91,6 @@ export class PeerConnection extends RTCPeerConnection {
 				await pc.addIceCandidate(ice);
 			} catch {}
 		}
-		return pc;
 	}
 
 	constructor(other_id) {
@@ -196,3 +189,7 @@ export class PeerConnection extends RTCPeerConnection {
 		}
 	}
 }
+messages.addEventListener('connect', PeerConnection.handle_connect);
+wanted_conns.addEventListener('wanted', ({peer_id}) => {
+	PeerConnection.connect(peer_id);
+});

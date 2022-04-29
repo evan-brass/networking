@@ -1,6 +1,6 @@
 import { decrypt, PeerId, sign, our_peerid } from "./peer-id.mjs";
 import { check_expiration } from "./lib.mjs";
-import { known_path, closest_conn } from "./routing.mjs";
+import { known_path, send_data, closest_conn } from "./routing.mjs";
 
 export const messages = new EventTarget();
 
@@ -23,18 +23,22 @@ export async function handle_data(conn, { data }) {
 	if (msg.target instanceof BigInt || (msg.path && msg.path[0] != our_peerid)) {
 		// Check if we know of any closer peers:
 		const target = msg.target ?? msg.path[0].kad_id;
-		const conn = closest_conn(target);
-		if (conn) {
-			await send_data(conn, {body, body_sig, back_path});
-			// TODO: send an ack message and then return.
-			return;
+		if (target) {
+			const conn = closest_conn(target);
+			if (conn) {
+				await send_data(conn, {body, body_sig, back_path});
+				// TODO: send an ack message and then return.
+				return;
+			}
 		}
 	}
 
 	// Try to encrypt any data if we are the intended recipient
 	if (msg.target == our_peerid.kad_id || msg.path && msg.path[0] == our_peerid) {
 		if (msg.encrypted) {
-			Object.assign(msg, JSON.parse(await decrypt(msg.encrypted)));
+			const res = JSON.parse(await decrypt(msg.encrypted));
+			msg.encrypted = undefined;
+			Object.assign(msg, res);
 		}
 	}
 
@@ -81,7 +85,7 @@ export async function verify_message(data, last_pid = our_peerid) {
 
 	// Decode the entries in the path field (if there are any)
 	if (msg.path) {
-		msg.path = msg.path.map(e => PeerId.from_encoded(e));
+		msg.path = await Promise.all(msg.path.map(e => PeerId.from_encoded(e)));
 	}
 
 	// If there's no path, then there must be a target field:

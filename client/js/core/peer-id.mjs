@@ -7,7 +7,7 @@ import { base64_decode, base64_encode, P256, P256DH, text_decoder, text_encoder,
  * The encoded form of a PeerId is `<ecdsa base64 encoded>&<ecdh base64 encoded>`.  The encoded form is what shows up in the back path
  * and in the sibling lists.  (In the future we should just use binary for everything, but...anyway)
  */
-const {publicKey: ecdsa, privateKey: ecdsa_priv} = await crypto.subtle.generateKey(P256, false, ['sign']);
+const {publicKey: ecdsa, privateKey: ecdsa_priv} = await crypto.subtle.generateKey(P256, false, ['sign', 'verify']);
 const {publicKey: ecdh, privateKey: ecdh_priv} = await crypto.subtle.generateKey(P256DH, false, ['deriveKey']);
 
 // Since we have two keys, our new encoded form will be   The encoded form is what will identify peers in the message paths and is what you would send in a list of your siblings during peer-exchange.
@@ -32,7 +32,7 @@ export async function decrypt(encrypted, as_text = true) {
 	const [ephemeral_encoded, iv_encoded, ciphertext] = encrypted.split('.');
 
 	// 2. Import the ephemeral Key
-	const ephemeral = await crypto.subtle.importKey('raw', base64_decode(ephemeral_encoded), P256DH, false, ['deriveKey']);
+	const ephemeral = await crypto.subtle.importKey('raw', base64_decode(ephemeral_encoded), P256DH, false, []);
 
 	// 3. Derive a shared secret using our ecdh_priv and the ephemeral ecdh key
 	const shared_key = await crypto.subtle.deriveKey({ name: 'ECDH', public: ephemeral}, ecdh_priv, { name: 'AES-CBC', length: 256}, false, ['decrypt']);
@@ -74,16 +74,20 @@ export class PeerId {
 		try {
 			const existing = known_ids.get(encoded);
 			if (existing) {
+				if (existing.then) return await existing;
 				const pid = existing.deref();
 				if (pid) return pid;
 			}
-	
+			// Reserve the known-id (using a promise) so that we don't accidentally create two ids for the same encoded
+			let res;
+			known_ids.set(encoded, new Promise(resolve => { res = resolve; }));
 			let [ecdsa, ecdh] = encoded.split('&').map(base64_decode);
 			ecdsa = await crypto.subtle.importKey('raw', ecdsa, P256, true, ['verify']);
 			ecdh = await crypto.subtle.importKey('raw', ecdh, P256DH, true, []);
 			const kad_id = await derive_kad_id(ecdsa, ecdh);
 			const ret = new PeerId({ecdsa, ecdh, kad_id, encoded});
 			known_ids.set(encoded, new WeakRef(ret));
+			res(ret);
 			return ret;
 		} catch (e) {
 			console.error(e);

@@ -1,5 +1,6 @@
 import { PeerId, our_peerid, known_ids } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
+import { above, below, sibling_range } from "./core/siblings.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -29,14 +30,24 @@ function draw_network() {
 
 	// Draw out all of the peer_ids that we've ever seen
 	for (const wr of known_ids.values()) {
+		if (!(wr instanceof WeakRef)) continue;
 		const pid = wr.deref();
 		if (pid == undefined) continue;
 		const conn = PeerConnection.connections.get(pid);
 
+		const {low, high} = sibling_range();
 		if (pid == our_peerid) {
 			ctx.fillStyle = 'red';
-		} else if (conn instanceof PeerConnection && conn.is_open()) {
-			ctx.fillStyle = 'blue';
+		} else if (conn instanceof PeerConnection) {
+			if (conn.is_open()) {
+				if (pid.kad_id <= high && pid.kad_id >= low) {
+					ctx.fillStyle = 'orange';
+				} else {
+					ctx.fillStyle = 'blue';
+				}
+			} else {
+				ctx.fillStyle = 'purple';
+			}
 		} else {
 			ctx.fillStyle = 'black';
 		}
