@@ -1,16 +1,29 @@
 import { bootstrap_tracker } from "./core/bootstrap.mjs";
-import { PeerId } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
+import { send } from "./core/routing.mjs";
+import { messages } from "./core/message.mjs";
 
-function timeout(t = 10000) {
-	return new Promise(r => setTimeout(r, t));
+messages.addEventListener('im-here', ({ origin }) => {
+
+});
+
+async function announce_self() {
+	// Pick a random connection
+	const all_conns = [...PeerConnection.connections.values()];
+	const rand = Math.trunc(Math.random() * all_conns.length);
+	const selected_conn = all_conns[rand];
+
+	// Send them an I'm here message
+	await send(selected_conn, {
+		type: 'im-here'
+	});
 }
 
 async function heartbeat() {
 	if (PeerConnection.connections.size < 1) {
-		await bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://tracker.btorrent.xyz");
+		await bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "ws://localhost:8000");
 	} else {
-		// await announce_self();
+		await announce_self();
 
 		// await refresh_bucket();
 	}

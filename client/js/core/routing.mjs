@@ -1,4 +1,8 @@
-import { PeerId } from "./peer-id.mjs";
+import { get_expiration } from "./lib.mjs";
+import { PeerId, sign, our_peerid } from "./peer-id.mjs";
+import { add_conn as k_add_conn, remove_conn as k_remove_conn, lookup } from "./kbuckets.mjs";
+import { add_conn as s_add_conn, remove_conn as s_remove_conn } from "./kbuckets.mjs";
+import { below, closer } from "./siblings.mjs";
 
 /**
  * Routing:
@@ -21,41 +25,95 @@ import { PeerId } from "./peer-id.mjs";
  * message and we don't know any closer peers to the destination's kad-id, then we drop the message.  This will trigger the sender's timeout.
  */
 
-const k = 2;
-// [[PeerConnection: k]: 255]
-const buckets = new Array(255);
-
-const s = k;
-// [PeerConnection]
-const siblings_above = [];
-const siblings_below = [];
-
-// PeerId -> PeerConnection
-const connections = new Map();
-// PeerId -> PeerId
+// PeerId -> PeerId | PeerConnection
 const sr_tree = new WeakMap();
 
 export function known_path(from, to) {
-	// TODO: implement
+	const from_entry = sr_tree.get(from);
+	if (!from_entry) return;
+
+	sr_tree.set(to, from);
 }
 
 export function add_conn(peer_connection) {
-	console.log(peer_connection);
+	sr_tree.set(peer_connection.other_id, peer_connection);
+
+	// Add to buckets
+	k_add_conn(peer_connection);
+
+	// Add to siblings
+	s_add_conn(peer_connection);
 }
 export function remove_conn(peer_connection) {
-	console.log(peer_connection);
-}
-export async function send(pidOrTarget, msg) {
-	let path, target;
-	if (pidOrTarget instanceof PeerId) {
-
-	} else {
-
+	const existing = sr_tree.get(peer_connection.other_id);
+	if (existing === peer_connection) {
+		sr_tree.delete(peer_connection.other_id)
 	}
+
+	// Remove from kbucket:
+	k_remove_conn(peer_connection);
+
+	// Remove siblings
+	s_remove_conn(peer_connection);
 }
-export async function send_data({ body, body_sig, back_path }) {
-	// Routing algorithm:
-	// 1. Try to route to the closest entry in the source_route entry
-	// 2. Try to kademlia route towards the target or kad_id of the last entry of the source_route
-	// 3. Try to route to the target in linear distance or 
+export function closest_conn(kad_id) {
+	// Pick the closest connection by kad_id
+	let conn;
+	for (const c of lookup(kad_id)) {
+		conn = c;
+		break;
+	}
+	if (conn) return conn;
+
+	// If we don't have a peer that's closer in Kademlia space, then send to a peer that is closer in linear space.
+	return closer(kad_id);
+}
+export async function send(connOrPidOrTarget, msg) {
+	// Add any required message fields if they're not present:
+	if (!msg.expiration) msg.expiration = get_expiration();
+
+	let path, target, conn;
+	if (connOrPidOrTarget instanceof PeerId) {
+		let entry = connOrPidOrTarget;
+		path = [];
+		for (; entry instanceof PeerId; entry = sr_tree.get(entry)) {
+			path.push(entry.encoded);
+		}
+		if (entry === undefined) {
+			// The path must be broken.
+			path = [connOrPidOrTarget.encoded];
+			conn = closest_conn(connOrPidOrTarget.kad_id);
+		} else {
+			conn = entry;
+		}
+
+		// Encrypt data if needed:
+		if (msg.encrypted) msg.encrypted = await connOrPidOrTarget.encrypt(JSON.stringify(msg.encrypted));
+	} else if (connOrPidOrTarget instanceof BigInt) {
+		target = connOrPidOrTarget.toString(16);
+
+		// Find the conn closest to the target
+		conn = closest_conn(target);
+	} else {
+		// I wish that I could add an instanceof check that it's a PeerConnection, but that would introduce a recursive dependency.
+		conn = connOrPidOrTarget;
+	}
+	const body = JSON.stringify({
+		path, target,
+		...msg
+	});
+	const body_sig = await sign(body);
+	const back_path = [];
+
+	await send_data(conn, { body, body_sig, back_path });
+}
+export async function send_data(conn, { body, body_sig, back_path }) {
+	const back_path_sig = await sign(conn.other_id.encoded + body_sig);
+	const new_back_path = [`${our_peerid.encoded}.${back_path_sig}`, ...back_path];
+	if (conn?.dc?.readyState === 'open') {
+		await conn.dc.send(JSON.stringify({
+			body, body_sig,
+			back_path: new_back_path
+		}));
+	}
 }

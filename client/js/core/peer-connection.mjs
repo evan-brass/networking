@@ -1,8 +1,8 @@
-import { PeerId, our_peerid } from "./peer-id.mjs";
-import { get_expiration, P256 } from "./lib.mjs";
+import { our_peerid } from "./peer-id.mjs";
+import { P256 } from "./lib.mjs";
 // import { routing_table, route_msg } from "./routing.mjs";
-import { messages, verify_message, MessageEvent } from "./message.mjs";
-import { add_conn, remove_conn, send, send_data } from "./routing.mjs";
+import { handle_data } from "./message.mjs";
+import { add_conn, remove_conn, send } from "./routing.mjs";
 
 // We don't care what this certificate is, but we want it to be reused long enough for all peers that might still have a peerconnection for our peerid have closed it.  That way the DTLS fingerprint never changes underneath a peerConnection.
 const certificates = [await RTCPeerConnection.generateCertificate(P256)];
@@ -63,7 +63,7 @@ export class PeerConnection extends RTCPeerConnection {
 	dc;
 	#connecting_timeout = false;
 	
-	// PeerId -> PeerConnection
+	// PeerId -> PeerConnection (The PeerConnection may not be open yet.)
 	static connections = new Map();
 
 	// Events announces when our peer connections open or close.
@@ -160,7 +160,7 @@ export class PeerConnection extends RTCPeerConnection {
 	#channel_open({ target: channel }) {
 		// We deduplicate hyperspace-network channels, but we don't deduplicate other channels.
 		if (channel.label == 'hyperspace-network') {
-			channel.onmessage = this.#network_msg.bind(this);
+			channel.onmessage = handle_data.bind(null, this);
 			if (this.#connecting_timeout !== undefined) {
 				clearTimeout(this.#connecting_timeout);
 				this.#connecting_timeout = undefined;
@@ -183,34 +183,6 @@ export class PeerConnection extends RTCPeerConnection {
 		if (this.dc === channel) {
 			this.dc = null;
 			remove_conn(this);
-		}
-	}
-	async #network_msg({ data }) {
-		const {origin, msg, body, body_sig, back_path_parsed, back_path} = await verify_message(data);
-
-		// Check to make sure that whoever forwarded this to us put themself into the back_path properly
-		if (parts.back_path_parsed[parts.back_path_parsed.length - 1] !== this.other_id) {
-			throw new Error("The other_id of the connection that this message came in on didn't put itself in the back_path properly.");
-		}
-
-		// Forward the message if we're not the intended target:
-		if (parts.msg)
-		if (parts.msg.target instanceof BigInt) {
-
-		} else if (parts.msg.path && parts.msg.path[0] !== our_peerid) {
-			await send_data({body, body_sig, back_path});
-			return;
-		}
-
-		// If we're not the intended recipient, then we need to try to route the message closer to it's intended target
-
-		// Issue the message as an event:
-		console.log('recv', parts.msg);
-		const not_handled = messages.dispatchEvent(new MessageEvent(parts));
-
-		// If the event does not have its propagation stopped, then route the message to a closer peer
-		if (not_handled && routable.includes(parts.msg.type)) {
-			messages.dispatchEvent(new MessageEvent(parts, 'route'));
 		}
 	}
 	is_open() {
