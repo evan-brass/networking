@@ -37,7 +37,7 @@ export async function handle_data(conn, { data }) {
 	if (msg.target == our_peerid.kad_id || msg.path && msg.path[0] == our_peerid) {
 		if (msg.encrypted) {
 			const res = JSON.parse(await decrypt(msg.encrypted));
-			msg.encrypted = undefined;
+			msg.encrypted = true;
 			Object.assign(msg, res);
 		}
 	}

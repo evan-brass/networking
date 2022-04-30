@@ -1,6 +1,7 @@
 import { PeerId, our_peerid, known_ids } from "./core/peer-id.mjs";
 import { PeerConnection } from "./core/peer-connection.mjs";
 import { above, below, sibling_range } from "./core/siblings.mjs";
+import { bucket_index } from "./core/kbuckets.mjs";
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -52,15 +53,15 @@ function draw_network() {
 			ctx.fillStyle = 'black';
 		}
 
-		// const bi = bucket_index(pid.kad_id);
+		const bi = bucket_index(pid.kad_id);
 		
 		const {x, y} = position_pid(pid);
 		ctx.beginPath();
 		ctx.arc(x, y, node_radius, 0, 2 * Math.PI);
 		ctx.closePath();
 		ctx.fill();
-		// ctx.font = "30px bold sans-serif";
-		// ctx.fillText(bi, x + 20, y + 10);
+		ctx.font = "30px bold sans-serif";
+		ctx.fillText(bi, x + 20, y + 10);
 	}
 
 	// Draw the sniffed connections

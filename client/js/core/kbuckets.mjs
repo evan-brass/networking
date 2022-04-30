@@ -8,9 +8,9 @@ import { our_peerid } from "./peer-id.mjs";
  * Whatever design decisions we make, we'll need to eventually simulate the network and verify that it performs well under various attack methods.
  */
 
-const k = 1;
+export const k = 1;
 
-const buckets = [];
+export const buckets = [];
 function get_bucket(i) {
 	if (!Array.isArray(buckets[i])) {
 		buckets[i] = [];

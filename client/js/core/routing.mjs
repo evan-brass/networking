@@ -104,15 +104,18 @@ export async function send(connOrPidOrTarget, msg) {
 
 		// Encrypt data if needed:
 		if (msg.encrypted) msg.encrypted = await connOrPidOrTarget.encrypt(JSON.stringify(msg.encrypted));
-	} else if (connOrPidOrTarget instanceof BigInt) {
+	} else if (typeof connOrPidOrTarget == 'bigint') {
 		target = connOrPidOrTarget.toString(16);
 
 		// Find the conn closest to the target
-		conn = closest_conn(target);
+		conn = closest_conn(connOrPidOrTarget);
 	} else {
 		// I wish that I could add an instanceof check that it's a PeerConnection, but that would introduce a recursive dependency.
 		conn = connOrPidOrTarget;
 	}
+
+	if (!conn) return;
+
 	const body = JSON.stringify({
 		path, target,
 		...msg
