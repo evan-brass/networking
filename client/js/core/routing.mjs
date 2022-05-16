@@ -36,6 +36,7 @@ class WantedEvent extends CustomEvent {
 const sr_tree = new WeakMap();
 
 export function known_path(from, to) {
+	console.log(`Overheard, ${from.kad_id}, ${to.kad_id}, ${performance.now()}`);
 	const from_entry = sr_tree.get(from);
 	if (!from_entry) return;
 

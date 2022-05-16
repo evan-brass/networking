@@ -1,4 +1,3 @@
-import { our_peerid } from "./peer-id.mjs";
 import { P256 } from "./lib.mjs";
 // import { routing_table, route_msg } from "./routing.mjs";
 import { handle_data, messages } from "./message.mjs";
@@ -8,13 +7,26 @@ import { add_conn, remove_conn, send, wanted_conns } from "./routing.mjs";
 const certificates = [await RTCPeerConnection.generateCertificate(P256)];
 
 // TODO: let the user edit their ICE configuration
-const iceServers = [{
+const iceServers = [
 	// A list of stun/turn servers: https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
-	urls: [
-		'stun:stun.l.google.com:19302',
-		'stun:stun1.l.google.com:19302'
-	]
-}];
+	{
+		urls: [
+			'stun:stun.l.google.com:19302',
+			'stun:stun1.l.google.com:19302'
+		]
+	},
+	// {
+	// 	urls: "stun:openrelay.metered.ca:80"
+	// }, {
+	// 	urls: [
+	// 		"turns:openrelay.metered.ca:443",
+	// 		"turn:openrelay.metered.ca:80",
+	// 		"turn:openrelay.metered.ca:443?transport=tcp"
+	// 	],
+	// 	username: "openrelayproject",
+	// 	credential: "openrelayproject"
+	// }
+];
 
 class DataChannelEvent extends CustomEvent {
 	constructor(peer_connection, channel) {
@@ -75,6 +87,7 @@ export class PeerConnection extends RTCPeerConnection {
 	}
 	static async handle_connect({origin, msg: { ice, ice_ufrag, ice_pwd, dtls_fingerprint }}) {
 		const pc = PeerConnection.connect(origin);
+		// Wait until our offer has been successfully applied before we start adding remote information.
 		while (pc.localDescription == null) {
 			await new Promise(res => pc.addEventListener('signalingstatechange', res, {once: true}));
 		}
@@ -165,6 +178,7 @@ export class PeerConnection extends RTCPeerConnection {
 				}
 			} else {
 				this.dc = channel;
+				console.log(`Connected, , ${this.other_id.kad_id}, ${performance.now()}`);
 				add_conn(this);
 			}
 		} else {
@@ -175,6 +189,7 @@ export class PeerConnection extends RTCPeerConnection {
 	#channel_close({ target: channel }) {
 		if (this.dc === channel) {
 			this.dc = null;
+			console.log(`Disconnected, , ${this.other_id.kad_id}, ${performance.now()}`);
 			remove_conn(this);
 		}
 	}

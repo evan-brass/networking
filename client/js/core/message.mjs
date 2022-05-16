@@ -43,7 +43,7 @@ export async function handle_data(conn, { data }) {
 	}
 
 	// Issue the message as an event:
-	console.log('recv', msg);
+	// console.log('recv', msg);
 
 	messages.dispatchEvent(new MessageEvent({ origin, msg, body, body_sig, back_path_parsed, back_path }));
 }

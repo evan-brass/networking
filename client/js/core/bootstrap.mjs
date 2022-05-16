@@ -95,7 +95,7 @@ async function get_ws(tracker) {
 				if (old_interval) clearInterval(old_interval);
 
 				intervals.set(info_hash, setInterval(() => {
-					console.log('tracker_interval ran');
+					// console.log('tracker_interval ran');
 					if (ws.readyState == ws.OPEN) {
 						ws.send(JSON.stringify({
 							action: 'announce',

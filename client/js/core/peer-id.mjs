@@ -21,7 +21,7 @@ export function cleanup_known_ids() {
 // Sign some data using our peer's ecdsa key
 export async function sign(data) {
 	if (typeof data == 'string') {
-		data = text_encoder.encode(data);
+		data = text_encoder.encode(data); 
 	}
 	const signature = await crypto.subtle.sign(P256, ecdsa_priv, data);
 	return base64_encode(new Uint8Array(signature));
@@ -147,3 +147,4 @@ export const our_peerid = await (async function() {
 	return new PeerId({ecdsa, ecdh, kad_id, encoded});
 })();
 known_ids.set(our_peerid.encoded, new WeakRef(our_peerid));
+console.log(`Our Peer id, ${our_peerid.kad_id}`);

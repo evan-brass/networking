@@ -4,14 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-webrtc = "0.4"
-tokio-tungstenite = { version = "0.17", features = ["rustls"] }
+# webrtc = "0.4"
+# ring = "0.17.0-alpha.11"
 tokio = { version = "1", features = ["full", "tracing"] }
-serde_json = "1.0"
-serde = { version = "1", features = ["derive"] }
-futures-util = "0.3"
-base64 = "0.13"
-p256 = "0.7.3"
-rand = "0.7"
 eyre = "0.6"
-console-subscriber = "0.1"
+# I'm using a clone of webrtc-ice so that I can step through the code and debug.  It should work with the public version too though.
+webrtc-ice = { path = "../../webrtc/crates/ice" }
+simple_logger = "2.1.0"
+stun = "0.4.2"
+webrtc-util = "0.5.3"
+async-trait = "0.1.53"

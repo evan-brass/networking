@@ -1,359 +1,153 @@
-#![feature(once_cell)]
-use std::lazy::SyncLazy;
-use std::collections::HashMap;
+use eyre::Result;
+use stun::attributes::AttrType;
+use stun::textattrs::TextAttribute;
+use webrtc_ice::mdns::MulticastDnsMode;
+use webrtc_util::Conn;
+use std::collections::HashSet;
+use std::net::SocketAddr;
+use async_trait::async_trait;
 use std::sync::Arc;
 
-use eyre::Result;
-use eyre::eyre;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc::{channel, Sender};
 
-use tokio_tungstenite::accept_async;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::mpsc::unbounded_channel;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::api::API;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::protocol::Message as WSMessage;
-use p256::ecdsa::signature::Signer;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+use webrtc_ice::agent::{Agent, agent_config::AgentConfig};
+use webrtc_ice::candidate::{CandidateType, Candidate};
+use webrtc_ice::udp_mux::{UDPMuxDefault, UDPMuxParams, UDPMux};
+use webrtc_ice::udp_network::UDPNetwork;
+use webrtc_util::Result as ConResult;
+use stun::message::Message;
 
-mod messages;
-use messages::{FullMessage, VerifiedMessage, Message, RoutableMessage, UnRoutableMessage, Signature, PeerId};
-
-
-enum Route {
-	WS(UnboundedSender<WSMessage>),
-	DC(Arc<RTCDataChannel>)
+struct CustomWrapper {
+	pub inner: UdpSocket,
+	pub local_ufrag: String,
+	pub sender: Sender<String>
 }
-impl Route {
-	pub async fn send(&self, msg: &Message) -> Result<()> {
-		let fm = sign_message(&msg)?;
-		self.send_full(&fm).await
-	}
-	pub async fn send_full(&self, fm: &FullMessage) -> Result<()> {
-		let data = serde_json::to_string(fm)?;
-		match self {
-			Route::WS(ws) => {
-				println!("Sending a message over websocket");
-				ws.send(WSMessage::Text(data))?;
-			},
-			Route::DC(dc) => {
-				println!("Sending a message over RTCDataChannel.");
-				dc.send_text(data).await?;
+impl CustomWrapper {
+	async fn handle_data(&self, data: &[u8]) {
+		let mut msg = Message::new();
+		if let Ok(()) = msg.unmarshal_binary(data) {
+			if let Ok(TextAttribute { text: username, .. }) = TextAttribute::get_from_as(&msg, AttrType(6)) {
+				if let Some((lufrag, rufrag)) = username.split_once(':') {
+					if lufrag == self.local_ufrag {
+						let _ = self.sender.send(rufrag.to_string()).await;
+					}
+				}
 			}
 		}
+	}
+}
+#[async_trait]
+impl Conn for CustomWrapper {
+	async fn connect(&self, addr: SocketAddr) -> ConResult<()> {
+		Ok(self.inner.connect(addr).await?)
+	}
 
+	async fn recv(&self, buf: &mut [u8]) -> ConResult<usize> {
+		let ret = self.inner.recv(buf).await?;
+		self.handle_data(&buf[..ret]).await;
+		Ok(ret)
+	}
+
+	async fn recv_from(&self, buf: &mut [u8]) -> ConResult<(usize, SocketAddr)> {
+		let ret = self.inner.recv_from(buf).await?;
+		self.handle_data(&buf[..ret.0]).await;
+		Ok(ret)
+	}
+
+	async fn send(&self, buf: &[u8]) -> ConResult<usize> {
+		println!("{buf:?}");
+		Ok(self.inner.send(buf).await?)
+	}
+
+	async fn send_to(&self, buf: &[u8], target: SocketAddr) -> ConResult<usize> {
+		println!("{buf:?}");
+		Ok(self.inner.send_to(buf, target).await?)
+	}
+
+	async fn local_addr(&self) -> ConResult<SocketAddr> {
+		Ok(self.inner.local_addr()?)
+	}
+
+	async fn remote_addr(&self) -> Option<SocketAddr> {
+		None
+	}
+
+	async fn close(&self) -> ConResult<()> {
 		Ok(())
 	}
 }
 
+async fn new_agent(udp_mux: Arc<UDPMuxDefault>, local_ufrag: String, local_pwd: String, rufrag: String) -> Result<()> {
+	println!("Creating new agent: {local_ufrag}:{rufrag}");
 
-// The routing_table contains only *open* connections to a peer.  We can't put pending websockets or datachannels in here.
-static ROUTING_TABLE: SyncLazy<RwLock<HashMap<PeerId, Route>>> = SyncLazy::new(|| {
-	RwLock::new(HashMap::new())
-});
+	// let _conn = udp_mux.clone().get_conn(&rufrag).await?;
 
-static CONNECTION_TABLE: SyncLazy<RwLock<HashMap<PeerId, RTCPeerConnection>>> = SyncLazy::new(|| {
-	RwLock::new(HashMap::new())
-});
+	let mut config = AgentConfig::default();
+	config.lite = true;
+	config.candidate_types = vec![CandidateType::Host];
+	config.multicast_dns_mode = MulticastDnsMode::Disabled;
+	config.is_controlling = false;
+	config.udp_network = UDPNetwork::Muxed(udp_mux);
+	config.local_ufrag = local_ufrag;
+	config.local_pwd = local_pwd.clone();
+	let (_cancel_tx, cancel_rx) = channel(1);
+	let agent = Agent::new(config).await?;
 
-static PEER_KEY: SyncLazy<p256::ecdsa::SigningKey> = SyncLazy::new(|| {
-	p256::ecdsa::SigningKey::random(rand::thread_rng())
-});
-
-static RTC_API: SyncLazy<API> = SyncLazy::new(|| {
-	webrtc::api::APIBuilder::new().build()
-});
-
-
-fn sign_message(msg: &Message) -> Result<FullMessage> {
-	let body = serde_json::to_string(&msg)?;
-	let signature = PEER_KEY.sign(body.as_bytes());
-	let signature = Signature(signature);
-	let origin = PeerId(PEER_KEY.verify_key());
-	Ok(FullMessage {
-		origin, body, signature
-	})
-}
-
-
-#[tokio::main]
-async fn main() -> Result<()> {
-	console_subscriber::init();
-
-	let listener = TcpListener::bind("0.0.0.0:3030").await?;
-
-	let (sender, mut recv) = tokio::sync::mpsc::channel::<FullMessage>(10);
-
-	// Listen to and handle messages (whether from WS or DC)
-	let handle_sender = sender.clone();
-	tokio::spawn(async move {
-		while let Some(m) = recv.recv().await {
-			handle_message(handle_sender.clone(), m).await.unwrap();
-			println!("Finished handling message.");
+	agent.on_candidate(Box::new(|candidate| Box::pin(async {
+		if let Some(candidate) = candidate {
+			println!("{candidate}");
 		}
-	});
+	}))).await;
+	agent.on_connection_state_change(Box::new(|state| {
+		println!("{state:?}");
 
-	// Listen to incoming WebSockets
-	loop {
-		let (stream, _addr) = listener.accept().await?;
-		let sender = sender.clone();
-		tokio::spawn(async {
-			if let Err(e) = handle_conn(sender, stream).await {
-				eprintln!("{:?}", e);
-			}
-		});
-	}
-}
-
-async fn handle_conn(sender: Sender<FullMessage>, stream: TcpStream) -> Result<()> {
-	let mut ws = accept_async(stream).await?;
-
-
-	// The first thing we do is send an addresses message so that the client on the other side knows what our peer_id is.
-	let addr = sign_message(&Message::Routable(RoutableMessage::Addresses { 
-		addresses: vec![String::from("ws://localhost:3030")]
-	}))?;
-	ws.feed(WSMessage::Text(
-		serde_json::to_string(&addr)?
-	)).await?;
-
-	// We need to listen for the first verified message so that we can insert the WebSocket into our routing table:
-	if let Some(Ok(WSMessage::Text(s))) = ws.next().await {
-		let fm = serde_json::from_str::<FullMessage>(&s)?;
-		let vm = fm.verify()?;
-
-
-		let (mut sink, mut stream) = ws.split();
-		let (tx, mut rx) = unbounded_channel();
-
-		let mut rt = ROUTING_TABLE.write().await;
-		rt.insert(vm.origin.clone(), Route::WS(tx));
-
-		sender.send(fm).await.map_err(|_| eyre!("Failed to send verified message"))?;
-
-		// Continue reading the websocket until it closes
-		tokio::spawn(async move {
-			while let Some(Ok(WSMessage::Text(s))) = stream.next().await {
-				let fm = serde_json::from_str::<FullMessage>(&s)?;
+		Box::pin(async {})
+	})).await;
+	agent.on_selected_candidate_pair_change(Box::new(|local_candidate, remote_candidate| {
+		println!("{local_candidate} <-> {remote_candidate}");
 		
-				sender.send(fm).await
-					.map_err(|_| eyre!("Failed to send verified message"))?;
-			}
-			Result::<(), eyre::Report>::Ok(())
-		});
+		Box::pin(async {})
+	})).await;
 
-		// Send any messages on from the tx
-		tokio::spawn(async move {
-			while let Some(m) = rx.recv().await {
-				sink.send(m).await?;
-			}
-			Result::<(), eyre::Report>::Ok(())
-		});
-	}
+	// println!("About to set remote credentials");
+	// agent.set_remote_credentials(rufrag.clone(), "unused-unused-unused-unused".into()).await?;
+
+	println!("About to gather local candidates");
+	agent.gather_candidates().await?;
+
+	println!("About to try to accept the connection.");
+	agent.accept(cancel_rx, rufrag, "unused-unused-unused-unused".into()).await?;
+	println!("Connection accepted.");
+
 	Ok(())
 }
 
-async fn create_connection(sender: Sender<FullMessage>, origin: PeerId, reply: Arc<Reply>) -> Result<RTCPeerConnection> {
-	println!("Creating RTCPeerConnection");
+#[tokio::main]
+async fn main() -> Result<()> {
+	simple_logger::init()?;
 
-	let mut config = RTCConfiguration::default();
-	config.ice_servers = vec![RTCIceServer {
-		urls: vec![
-			String::from("stun:stun.l.google.com:19302"),
-			String::from("stun:stun1.l.google.com:19302")
-		],
-		username: String::new(),
-		credential: String::new(),
-		credential_type: RTCIceCredentialType::Unspecified
-	}];
-	let ret = RTC_API.new_peer_connection(config).await?;
-
-	// This may be the most ugly code I've ever written.  Yuck.
-	let nn_reply = reply.clone();
-	let nn_origin = origin.clone();
-	ret.on_negotiation_needed(Box::new(move || {
-		println!("Negotiation Needed");
-
-		let origin = nn_origin.clone();
-		let reply = nn_reply.clone();
-		Box::pin(async move {
-			// TODO: remove the .unwraps here
-			let conn_table = CONNECTION_TABLE.read().await;
-			let conn: &RTCPeerConnection = conn_table.get(&origin).unwrap();
-			let sdp = Some(conn.create_offer(None).await.unwrap());
-			reply.reply(RoutableMessage::Connect { sdp, ice: None }).await.unwrap();
-		})
-	})).await;
-
-	let ice_reply = reply.clone();
-	ret.on_ice_candidate(Box::new(move |candidate| {
-		let reply = ice_reply.clone();
-		Box::pin(async move {
-			// TODO: remove the .unwraps here
-			if let Some(candidate) = candidate {
-				reply.reply(RoutableMessage::Connect { sdp: None, ice: Some(
-					candidate.to_json().await.unwrap()
-				) }).await.unwrap();
-			}
-		})
-	})).await;
-
-	let channel = ret.create_data_channel("hyperspace-protocol", Some(RTCDataChannelInit {
-		negotiated: Some(true),
-		id: Some(42),
-		ordered: None,
-		max_packet_life_time: None,
-		max_retransmits: None,
-		protocol: None
-	})).await?;
-
-	channel.on_message(Box::new(move |DataChannelMessage {is_string: _, data}| {
-		let local_sender = sender.clone();
-		Box::pin(async move {
-			let s = std::str::from_utf8(data.as_ref()).unwrap();
-			let fm = serde_json::from_str::<FullMessage>(&s).unwrap();
-			local_sender.send(fm).await.map_err(|_| ()).unwrap();
-		})
-	})).await;
+	let socket = UdpSocket::bind("0.0.0.0:3333").await?;
 	
-	let dc = channel.clone();
-	channel.on_open(Box::new(|| {
-		println!("New RTCDataChannel Openned!");
-		Box::pin(async move {
-			let mut rt = ROUTING_TABLE.write().await;
-			rt.insert(origin, Route::DC(dc));
-		})
-	})).await;
+	let local_ufrag = "iHa3".to_string();
+	let local_pwd = "raj/XuQAfh/2sz1eDKTZbmgE".to_string();
 
-	Ok(ret)
-}
-
-#[derive(Clone)]
-enum Reply {
-	Direct(PeerId),
-	Path(Vec<PeerId>)
-	// TODO: add a path reply for responding to routed messages
-}
-impl Reply {
-	async fn reply(&self, msg: RoutableMessage) -> Result<()> {
-		match self {
-			Reply::Direct(origin) => {
-				println!("Replying directly");
-				let rt = ROUTING_TABLE.read().await;
-				if let Some(route) = rt.get(origin) {
-					route.send(&Message::Routable(msg)).await?;
-					return Ok(())
-				}
-			},
-			Reply::Path(path) => {
-				println!("Replying via path");
-				// Try to route the message onward
-				let rt = ROUTING_TABLE.read().await;
-				for peer_id in path.iter().rev() {
-					if let Some(route) = rt.get(peer_id) {
-						route.send(&Message::UnRoutable(UnRoutableMessage::SourceRoute {
-							path: path.clone(), content: msg
-						})).await?;
-						return Ok(())
-					}
-				}
-			}
-		}
-		Err(eyre!("Failed to reply."))
-	}
-}
-
-async fn handle_message(sender: Sender<FullMessage>, fm: FullMessage) -> Result<()> {
-	let VerifiedMessage { origin, message } = fm.verify()?;
-
-	let (message, reply) = match message {
-		Message::UnRoutable(UnRoutableMessage::SourceRoute{ path, content }) => {
-			let mut path_back: Vec<_> = path.iter().cloned().rev().collect();
-			path_back.push(origin.clone());
-
-			let our_peer_id = PeerId(PEER_KEY.verify_key());
-			if path.last() != Some(&our_peer_id) {
-				// Try to route the message onward
-				let rt = ROUTING_TABLE.read().await;
-				for peer_id in path.iter().rev() {
-					if peer_id == &our_peer_id {
-						// Routing failed
-						break;
-					} else if let Some(route) = rt.get(peer_id) {
-						route.send_full(&fm).await?;
-						return Ok(())
-					}
-				}
-				// Send a routing failed message if the message wasn't already an error
-				if !content.is_error() {
-					Reply::Path(path_back).reply(RoutableMessage::Error {
-						msg: String::from("Routing failed"), data: HashMap::new()
-					}).await?;
-				}
-				return Err(eyre!("Routing failed: {:?}", path));
-			}
-			(content, Arc::new(Reply::Path(path_back)))
-		},
-		Message::UnRoutable(UnRoutableMessage::AppData { content: _ }) => {
-			// TODO: Send the data to the proper application.  Although, public peers probably won't have any applications running so... For now we'll just ignore data messages.
-			return Ok(());
-		},
-		Message::Routable(m) => (m, Arc::new(Reply::Direct(origin.clone())))
+	let (ufrag_tx, mut ufrag_rx) = channel(5);
+	let socket = CustomWrapper {
+		inner: socket,
+		local_ufrag: local_ufrag.clone(),
+		sender: ufrag_tx
 	};
 
-	println!("{:?}", message);
+	let ice_port = UDPMuxDefault::new(UDPMuxParams::new(socket));
 
-	match message {
-		RoutableMessage::Connect {
-			sdp,
-			ice
-		} => {
-			let mut conn_table = CONNECTION_TABLE.write().await;
-			if !conn_table.contains_key(&origin) {
-				conn_table.insert(
-					origin.clone(),
-					create_connection(sender, origin.clone(), reply.clone()).await?
-				);
-			}
-			let conn: &mut RTCPeerConnection = conn_table.get_mut(&origin).unwrap();
-			if let Some(sdp) = sdp {
-				if sdp.sdp_type == RTCSdpType::Offer {
-					conn.set_remote_description(sdp).await?;
-					let answer = conn.create_answer(None).await?;
-					conn.set_local_description(answer).await?;
-					reply.reply(RoutableMessage::Connect { 
-						sdp: conn.local_description().await, ice: None
-					}).await?;
-				} else {
-					conn.set_remote_description(sdp).await?;
-				}
-			}
-			if let Some(ice) = ice {
-				conn.add_ice_candidate(ice).await?;
-			}
-		},
-		RoutableMessage::Query { addresses, routing_table } => {
-			if addresses {
-				reply.reply(RoutableMessage::Addresses { addresses: vec![
-					String::from("localhost:3030")
-				] }).await?;
-			}
-			if routing_table {
-				let rt = ROUTING_TABLE.read().await;
-				let peers = rt.keys().cloned().collect();
-				reply.reply(RoutableMessage::RoutingTable { peers }).await?;
-			}
+	let mut known_ufrags = HashSet::new();
+
+	while let Some(rufrag) = ufrag_rx.recv().await {
+		if !known_ufrags.contains(&rufrag) {
+			known_ufrags.insert(rufrag.clone());
+			tokio::spawn(new_agent(ice_port.clone(), local_ufrag.clone(), local_pwd.clone(), rufrag));
 		}
-		_ => {}
 	}
 
 	Ok(())
