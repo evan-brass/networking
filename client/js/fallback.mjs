@@ -59,7 +59,7 @@ async function refresh_bucket() {
 
 async function heartbeat() {
 	if (PeerConnection.connections.size < 1) {
-		await bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "ws://localhost:8000");
+		await bootstrap_tracker("¾\x80v\x90ú!çD\x1A\x98\x80\x8AÄWrÇìô5v", "wss://tracker.openwebtorrent.com");
 	} else {
 		if (Math.random() > 0.5) {
 			await announce_self();
